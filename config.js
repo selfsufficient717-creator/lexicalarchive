@@ -3,5 +3,5 @@
 export const CONFIG = Object.freeze({
   apiBaseUrl: '',
   supabaseUrl: 'https://xnctcfonfxzqjjronlse.supabase.co',
-  supabaseAnonKey: '',
+  supabaseAnonKey: 'sb_publishable_ijbsA_aJlsSvzV9qDRx5BQ_vPu0oA7d',
 });
