@@ -1,0 +1,56 @@
+{
+  "items": [
+    {
+      "term": "ceasefire",
+      "kind": "word",
+      "pronunciation": "/ˈsiːsfaɪər/",
+      "definition": "An agreement to stop fighting, often for a short time.",
+      "translation": "sulh",
+      "language": "Uzbek",
+      "examples": ["The two sides agreed to a ceasefire.", "The ceasefire allowed families to leave safely."],
+      "synonyms": ["truce", "armistice"],
+      "antonyms": ["hostilities", "fighting"],
+      "antonymNote": "These are contextual opposites, rather than exact opposites in every sentence.",
+      "usageNote": "Agree to a ceasefire; negotiate a ceasefire; break a ceasefire.",
+      "writingPrompt": "Explain how a ceasefire could help a community rebuild trust.",
+      "speakingPrompt": "Describe how a community might use a ceasefire to find a lasting solution.",
+      "exercises": [
+        {"type": "meaning", "question": "Which meaning describes a ceasefire?", "options": ["An agreement to stop fighting.", "A plan to begin fighting.", "A celebration after a journey."], "answer": "An agreement to stop fighting.", "explanation": "Both sides agree to stop fighting."},
+        {"type": "synonym", "question": "Choose a similar word.", "options": ["truce", "argument", "arrival"], "answer": "truce", "explanation": "A truce also pauses fighting."},
+        {"type": "antonym", "question": "Choose the contextual opposite.", "options": ["hostilities", "agreement", "rest"], "answer": "hostilities", "explanation": "Hostilities are active fighting."},
+        {"type": "gap", "question": "For many weeks, families had stayed indoors because fighting continued around their homes. At last, representatives from both sides met to agree on a _____. This pause gave aid workers a chance to bring food, allowed children to return to school, and opened a path to further talks. Yet everyone knew the agreement would need careful monitoring. Community leaders organized regular meetings so that people could report problems and discuss practical needs. They hoped that this first pause would become the beginning of a lasting peace rather than another brief interruption in the conflict.", "options": ["ceasefire", "journey", "storm"], "answer": "ceasefire", "explanation": "A pause in fighting fits this passage."},
+        {"type": "context", "question": "Where does ceasefire fit naturally?", "options": ["Both armies agreed to stop fighting.", "The cake rose in the oven.", "The bus arrived early."], "answer": "Both armies agreed to stop fighting.", "explanation": "Ceasefire concerns stopping conflict."},
+        {"type": "collocation", "question": "Choose a natural word partner.", "options": ["negotiate a ceasefire", "bake a ceasefire", "water a ceasefire"], "answer": "negotiate a ceasefire", "explanation": "Negotiate means work toward an agreement."}
+      ]
+    },
+    {
+      "term": "<img src=x onerror=window.injected=true> bury the hatchet",
+      "kind": "idiom",
+      "pronunciation": "",
+      "definition": "To end an argument and become friendly again.",
+      "translation": "yarashmoq",
+      "language": "Uzbek",
+      "examples": ["After their long disagreement, they decided to bury the hatchet.", "We should bury the hatchet and work together."],
+      "synonyms": ["make peace", "reconcile"],
+      "antonyms": ["hold a grudge", "renew a quarrel"],
+      "usageNote": "This idiom describes settling a disagreement.",
+      "writingPrompt": "Write about two neighbors who choose to bury the hatchet.",
+      "speakingPrompt": "Explain why friends might decide to bury the hatchet.",
+      "exercises": []
+    }
+  ],
+  "feedback": {
+    "overall": "Your main idea is clear and the target vocabulary fits the situation. You can improve how the ideas connect.",
+    "comparison": "Your revision makes the connection between the agreement and rebuilding trust clearer.",
+    "criteria": [
+      {"name": "Topic understanding and ideas", "score": 4, "comment": "The ideas address the topic and are plausible."},
+      {"name": "Cohesion and coherence", "score": 3, "comment": "Add an explicit transition between the two points."},
+      {"name": "Word choice", "score": 4, "comment": "Ceasefire is used accurately."},
+      {"name": "Naturalness", "score": 3, "comment": "One phrase can sound more natural."},
+      {"name": "Readability", "score": 4, "comment": "The response is easy to follow."}
+    ],
+    "mistakes": [{"mistake": "The agreement make people hopeful.", "why": "The singular subject needs the verb makes.", "improvement": "Write: The agreement makes people hopeful."}],
+    "nextSteps": ["Add one specific example of rebuilding trust."],
+    "limitations": []
+  }
+}

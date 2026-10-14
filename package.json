@@ -1,0 +1,12 @@
+{
+  "name": "lexical-trove",
+  "version": "2.0.0",
+  "private": true,
+  "description": "A personal vocabulary collection with contextual practice and audio feedback",
+  "type": "module",
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "start": "node --use-env-proxy server/index.js",
+    "test": "node --test"
+  }
+}

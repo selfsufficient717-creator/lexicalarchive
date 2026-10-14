@@ -1,0 +1,25 @@
+# Import this blueprint from the repository root path server/render.yaml.
+# A paid always-on instance avoids cold-start failures for audio requests.
+services:
+  - type: web
+    name: lexical-trove-api
+    runtime: node
+    plan: starter
+    buildCommand: node --version
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: 24.19.0
+      - key: ALLOWED_ORIGIN
+        value: https://selfsufficient717-creator.github.io
+      - key: LEXICAL_TEXT_MODEL
+        value: gpt-4o-mini
+      - key: LEXICAL_AUDIO_MODEL
+        value: gpt-audio
+      - key: LEXICAL_AI_API_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
