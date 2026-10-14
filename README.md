@@ -15,7 +15,7 @@ Turn English words, phrases, long expressions, and idioms encountered in real li
 
 The static frontend can stay on GitHub Pages. A small authenticated Node API calls OpenAI with a server-only key. Supabase handles email sign-in, private data with row-level security, and profile images. No OpenAI or Supabase service-role key belongs in browser code. See [DEPLOYMENT.md](DEPLOYMENT.md) for the setup walkthrough.
 
-The repo intentionally has no configured service URLs or keys. Without them, the interface explains that the learning service is not connected; it does not fabricate definitions, sign-in, or feedback. Tests use fixtures only in test code. Actual AI output and email delivery require live services to be checked after configuration.
+The public connection settings in `config.js` point to the Supabase project and the Render API. Private AI credentials stay in the hosting service's environment settings. If a service is unavailable or unconfigured, the app reports the error; it does not fabricate definitions, sign-in, or feedback. Tests use fixtures only in test code. Actual AI output and email delivery still require live checks with a confirmed account.
 
 ## Development
 
