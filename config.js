@@ -2,6 +2,6 @@
 // Set these after creating the services described in DEPLOYMENT.md.
 export const CONFIG = Object.freeze({
   apiBaseUrl: '',
-  supabaseUrl: '',
+  supabaseUrl: 'https://xnctcfonfxzqjjronlse.supabase.co',
   supabaseAnonKey: '',
 });
