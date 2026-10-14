@@ -71,3 +71,19 @@ Commit the public configuration with the tested app files to the `main` branch u
 - Check mobile layout, expired sign-in recovery, and a provider outage. Errors must remain visible and unsuccessful assessments must not consume an attempt.
 
 Do not describe the app as fully connected until these checks pass. Automated tests use controlled service doubles and do not establish live account/email, AI quality, or database-policy readiness.
+
+## If the AI service rejects a request
+
+The app distinguishes quota, authentication, permissions, model availability, and temporary rate limits. Render logs contain a safe `ai_provider_error` event with the HTTP status, a recognized provider error code, and the app's category. They never include provider error messages, keys, recordings, or learner responses.
+
+| Category | Action |
+| --- | --- |
+| `provider_quota` | Check API credits and usage limits in the OpenAI organization/project that owns the Render key. A ChatGPT subscription does not fund API usage. |
+| `provider_authentication` | Check that the Render secret is a valid, active OpenAI project key. Replace it privately in Render if necessary. |
+| `provider_permission` | Check that the key/project can call Chat Completions and the selected model. |
+| `provider_model_unavailable` | Check access to the configured text/audio model. |
+| `provider_rate_limit` | Wait before retrying; check the project's API rate limits. |
+| `provider_request_failed` | Inspect the safe diagnostic code and review compatibility of any model overrides. |
+| `provider_unavailable` | Retry after a temporary provider failure. |
+
+Failed assessments do not consume a revision. Funding an API account is a user action; a deployment or an API key alone does not establish available credits.

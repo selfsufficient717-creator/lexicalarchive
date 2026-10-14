@@ -56,7 +56,7 @@ function wav(seconds = 2) {
   return { base64: buffer.toString('base64'), format: 'wav' };
 }
 
-function upstream({ authStatus = 200, confirmed = true, attempts = [], providerValue, providerStatus = 200, providerFinish = 'stop', missingItem = false, storageFail = false, storageStatus = 500, storageCode = 'unknown' } = {}) {
+function upstream({ authStatus = 200, confirmed = true, attempts = [], providerValue, providerStatus = 200, providerError, providerFinish = 'stop', missingItem = false, storageFail = false, storageStatus = 500, storageCode = 'unknown' } = {}) {
   const calls = [];
   const fetchImpl = async (url, options = {}) => {
     const body = options.body ? JSON.parse(options.body) : null;
@@ -66,6 +66,7 @@ function upstream({ authStatus = 200, confirmed = true, attempts = [], providerV
     if (url.includes('/rest/v1/attempts?') && options.method === 'POST') return Response.json(storageFail ? { code: storageCode, details: 'private-db-details', message: 'internal SQL and account data' } : [{ id: ATTEMPT_ID, attempt_number: body.attempt_number }], { status: storageFail ? storageStatus : 201 });
     if (url.includes('/rest/v1/attempts?')) return Response.json(attempts);
     if (url === 'https://api.openai.com/v1/chat/completions') {
+      if (providerStatus !== 200 && providerError) return Response.json(providerError, { status: providerStatus });
       const isFeedback = body.messages[0].content.includes('constructive language tutor');
       const audio = Array.isArray(body.messages[1].content);
       const userText = audio ? body.messages[1].content[0].text : body.messages[1].content;
@@ -233,6 +234,65 @@ test('provider failures and incomplete assessments neither expose provider detai
     assert.ok(!text.includes(config.aiKey));
     assert.equal(api.calls.filter((entry) => entry.options.method === 'POST' && entry.url.includes('/attempts?')).length, 0);
   }
+});
+
+test('provider error categories identify owner actions without exposing private details or consuming practice attempts', async (t) => {
+  const diagnostics = [];
+  const originalWarn = console.warn;
+  console.warn = (...args) => diagnostics.push(args);
+  t.after(() => { console.warn = originalWarn; });
+  const sensitive = [config.aiKey, 'private-learner@example.test', 'private submitted response', 'unknown-provider-code-with-private-data', 'private-provider-request-id'];
+  const failures = [
+    { status: 401, code: 'invalid_api_key', expectedStatus: 502, expectedCode: 'provider_authentication', message: /The AI service is not connected correctly\. Please contact the site owner\./ },
+    { status: 403, code: 'permission_denied', expectedStatus: 502, expectedCode: 'provider_permission' },
+    { status: 429, code: 'insufficient_quota', expectedStatus: 503, expectedCode: 'provider_quota', message: /credits or quota/i },
+    { status: 429, code: 'billing_hard_limit_reached', expectedStatus: 503, expectedCode: 'provider_quota', message: /credits or quota/i },
+    { status: 429, code: 'rate_limit_exceeded', expectedStatus: 503, expectedCode: 'provider_rate_limit', message: /try again|retry/i },
+    { status: 429, expectedStatus: 503, expectedCode: 'provider_rate_limit', message: /try again|retry/i },
+    { status: 404, code: 'model_not_found', expectedStatus: 502, expectedCode: 'provider_model_unavailable' },
+    { status: 400, code: 'model_not_found', expectedStatus: 502, expectedCode: 'provider_model_unavailable' },
+    { status: 400, code: sensitive[3], expectedStatus: 502, expectedCode: 'provider_request_failed' },
+    { status: 503, code: sensitive[3], expectedStatus: 502, expectedCode: 'provider_unavailable' },
+  ];
+  for (const failure of failures) {
+    const api = await start(t, { upstream: { providerStatus: failure.status, providerError: {
+      error: { code: failure.code, type: sensitive[1], message: sensitive.join(' '), param: sensitive[2] },
+      request_id: sensitive[4], private_account: sensitive[1],
+    } } });
+    for (const [route, request] of [
+      ['/api/lexicon', { text: sensitive[2], language: 'Russian' }],
+      ['/api/feedback', { ...practiceRequest(), response: sensitive[2] }],
+      ['/api/feedback', practiceRequest('speaking')],
+    ]) {
+      const response = await api.request(route, request);
+      const text = await response.text();
+      const payload = JSON.parse(text);
+      const label = `${route}, upstream ${failure.status}, ${failure.code || 'no code'}`;
+      assert.equal(response.status, failure.expectedStatus, label);
+      assert.equal(payload.error.code, failure.expectedCode, label);
+      if (failure.message) assert.match(payload.error.message, failure.message, label);
+      if (route === '/api/lexicon') assert.doesNotMatch(payload.error.message, /attempt/i, label);
+      for (const secret of sensitive) assert.ok(!text.includes(secret), `${label}: private provider text escaped`);
+    }
+    assert.equal(api.calls.filter((entry) => entry.options.method === 'POST' && entry.url.includes('/attempts?')).length, 0);
+  }
+  assert.equal(diagnostics.length, failures.length * 3, 'Each failed provider request should produce one safe diagnostic');
+  for (const [index, args] of diagnostics.entries()) {
+    assert.equal(args.length, 1);
+    assert.equal(typeof args[0], 'string');
+    const diagnostic = JSON.parse(args[0]);
+    const failure = failures[Math.floor(index / 3)];
+    assert.deepEqual(Object.keys(diagnostic).sort(), ['category', 'event', 'providerCode', 'upstreamStatus']);
+    assert.equal(diagnostic.event, 'ai_provider_error');
+    assert.equal(diagnostic.upstreamStatus, failure.status);
+    assert.equal(diagnostic.category, failure.expectedCode);
+    const allowedCodes = failure.code && !sensitive.includes(failure.code) ? ['unknown', failure.code] : ['unknown'];
+    assert.ok(allowedCodes.includes(diagnostic.providerCode), 'Only recognized provider codes belong in diagnostics');
+  }
+  const logged = JSON.stringify(diagnostics);
+  for (const secret of sensitive) assert.ok(!logged.includes(secret), 'Private provider fields or learner input escaped in diagnostics');
+  assert.ok(!logged.includes(BEARER), 'The session token escaped in diagnostics');
+  assert.ok(!logged.includes(wav().base64), 'A recording escaped in diagnostics');
 });
 
 test('cross-instance sequential-attempt SQL conflicts return a reload instruction without database details', async (t) => {

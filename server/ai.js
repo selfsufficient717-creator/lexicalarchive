@@ -17,6 +17,44 @@ Cover each criterion exactly once in the given order. Give the overall impressio
 ${mode === 'speaking' ? 'Assess fluency from pacing, pausing, hesitations, and delivery in the AUDIO. Assess organization and target vocabulary from the speech content. Assess overall pronunciation from what is actually audible, including intelligibility, stress and sound clarity. Never infer pronunciation or fluency from a transcript alone. Use transcript to show what was said, not as a substitute for listening. Do not penalize accent variety when intelligibility is good. If audio quality or lack of audible speech prevents a fair assessment, use null scores where needed and describe the limitations; do not produce a confident grade. Include a short limitation that this automated audio coaching is approximate.' : 'Assess topic understanding and whether ideas are relevant, reasonably supported, and reliable; distinguish unsupported claims from known factual errors, and do not claim external fact verification. Assess cohesion/coherence, all word choices including the target item, naturalness, and readability. Do not assume fluent writing is accurate without checking the actual word usage.'}`;
 }
 
+// Only recognized provider codes are retained. Error bodies can contain
+// credentials, account details, or learner text and must never be returned or logged.
+const PROVIDER_CODES = new Set([
+  'insufficient_quota', 'billing_hard_limit_reached', 'billing_not_active',
+  'invalid_api_key', 'incorrect_api_key', 'permission_denied', 'model_not_found',
+  'rate_limit_exceeded', 'unsupported_parameter', 'invalid_request_error',
+  'organization_deactivated', 'account_deactivated', 'access_terminated',
+  'unsupported_country_region_territory',
+]);
+
+async function providerFailure(response) {
+  let providerCode = 'unknown';
+  try {
+    const body = await response.json();
+    if (PROVIDER_CODES.has(body?.error?.code)) providerCode = body.error.code;
+    else if (PROVIDER_CODES.has(body?.error?.type)) providerCode = body.error.type;
+  } catch { /* Non-JSON errors still have an HTTP status we can classify. */ }
+
+  let error;
+  if (['insufficient_quota', 'billing_hard_limit_reached', 'billing_not_active'].includes(providerCode)) {
+    error = new ApiError(503, 'provider_quota', 'The AI service has no available credits or quota. Please contact the site owner.');
+  } else if (response.status === 401 || ['invalid_api_key', 'incorrect_api_key'].includes(providerCode)) {
+    error = new ApiError(502, 'provider_authentication', 'The AI service is not connected correctly. Please contact the site owner.');
+  } else if (response.status === 403) {
+    error = new ApiError(502, 'provider_permission', 'The AI service does not have access to this feature. Please contact the site owner.');
+  } else if (response.status === 429) {
+    error = new ApiError(503, 'provider_rate_limit', 'The AI service is receiving too many requests. Please wait a moment and try again.');
+  } else if (response.status === 404 || providerCode === 'model_not_found') {
+    error = new ApiError(502, 'provider_model_unavailable', 'The AI model for this feature is unavailable. Please contact the site owner.');
+  } else if (response.status === 400) {
+    error = new ApiError(502, 'provider_request_failed', 'The AI service could not process this request. Please contact the site owner.');
+  } else {
+    error = new ApiError(502, 'provider_unavailable', 'The AI service is temporarily unavailable. Please try again shortly.');
+  }
+  console.warn(JSON.stringify({ event: 'ai_provider_error', upstreamStatus: response.status, providerCode, category: error.code }));
+  return error;
+}
+
 export async function requestJson(config, fetchImpl, { model, messages, audio = false }) {
   let response;
   try {
@@ -32,8 +70,7 @@ export async function requestJson(config, fetchImpl, { model, messages, audio = 
     throw new ApiError(502, 'provider_unavailable', 'The language service could not be reached. Please try again shortly.');
   }
   if (!response.ok) {
-    // Provider bodies may contain echoed user text or account details; never expose them.
-    throw new ApiError(response.status === 429 ? 503 : 502, 'provider_unavailable', 'The language service is temporarily unavailable. Your response has not been counted as an attempt.');
+    throw await providerFailure(response);
   }
   try {
     const wire = await response.json();
