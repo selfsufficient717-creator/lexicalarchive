@@ -40,8 +40,8 @@ export function readConfig(env = process.env) {
     supabaseAnonKey: anonKey,
     allowedOrigin,
     mode: 'free',
-    geminiKey: env.LEXICAL_GEMINI_API_KEY || '',
-    geminiFreeTier: env.GEMINI_FREE_TIER === 'true',
+    geminiKey: (env.LEXICAL_GEMINI_API_KEY || '').trim(),
+    geminiFreeTier: (env.GEMINI_FREE_TIER || '').trim() === 'true',
   };
   config.geminiEnabled = Boolean(config.geminiKey && config.geminiFreeTier);
   config.configured = Boolean(config.supabaseUrl && config.supabaseAnonKey);
@@ -120,24 +120,54 @@ function makeLimiter(now) {
   };
 }
 
+const GEMINI_FALLBACKS = new Map([
+  ['gemini_quota', 'Free-tier AI has reached its request quota.'],
+  ['gemini_authentication', 'Free-tier AI could not authenticate.'],
+  ['gemini_permission', 'Free-tier AI is unavailable for this project or region.'],
+  ['gemini_model_unavailable', 'The free-tier AI model is unavailable.'],
+  ['gemini_request_failed', 'Free-tier AI could not process this request.'],
+  ['invalid_provider_response', 'Free-tier AI did not return a complete learning response.'],
+  ['gemini_unavailable', 'Free-tier AI is temporarily unavailable.'],
+]);
+
+function recordGeminiFallback(error) {
+  const code = GEMINI_FALLBACKS.has(error.code) ? error.code : 'gemini_unavailable';
+  // Fixed categories only: never log the key, request text, or provider body.
+  console.warn(JSON.stringify({ event: 'gemini_fallback', code }));
+  return GEMINI_FALLBACKS.get(code);
+}
+
 async function lookupFree(config, fetchImpl, request) {
+  let fallbackReason;
   if (config.geminiEnabled) {
     try { return await geminiLexicon(config, fetchImpl, request); }
-    catch (error) { if (!(error instanceof ApiError)) throw error; }
+    catch (error) {
+      if (!(error instanceof ApiError)) throw error;
+      fallbackReason = recordGeminiFallback(error);
+    }
   }
-  const item = await createLexicon(config, fetchImpl, request);
-  if (config.geminiEnabled) item.fallbackNote = 'Free-tier AI is unavailable for this request. This card uses sourced dictionary data instead.';
-  return item;
+  try {
+    const item = await createLexicon(config, fetchImpl, request);
+    if (fallbackReason) item.fallbackNote = `${fallbackReason} This card uses sourced dictionary data instead.`;
+    return item;
+  } catch (error) {
+    if (fallbackReason && error instanceof ApiError) throw new ApiError(error.status, error.code, `${fallbackReason} ${error.message}`);
+    throw error;
+  }
 }
 
 async function coachFree(config, fetchImpl, request) {
   if (config.geminiEnabled) {
     try { return await geminiFeedback(config, fetchImpl, request); }
-    catch (error) { if (!(error instanceof ApiError)) throw error; }
+    catch (error) {
+      if (!(error instanceof ApiError)) throw error;
+      const reason = recordGeminiFallback(error);
+      const feedback = await createFeedback(config, fetchImpl, request);
+      feedback.limitations.unshift(`${reason} This attempt uses basic coaching and counts as one of your three attempts.`);
+      return feedback;
+    }
   }
-  const feedback = await createFeedback(config, fetchImpl, request);
-  if (config.geminiEnabled) feedback.limitations.unshift('Free-tier AI is unavailable for this request. This attempt uses basic coaching and counts as one of your three attempts.');
-  return feedback;
+  return createFeedback(config, fetchImpl, request);
 }
 
 export function createApp({ config = readConfig(), fetchImpl = globalThis.fetch, now = Date.now, root = ROOT, lexiconImpl = lookupFree, feedbackImpl = coachFree } = {}) {
@@ -174,7 +204,14 @@ export function createApp({ config = readConfig(), fetchImpl = globalThis.fetch,
         res.end();
         return;
       }
-      if (req.method === 'GET' && pathname === '/api/health') return json(res, 200, { ok: true, configured: config.configured, mode: 'free' });
+      if (req.method === 'GET' && pathname === '/api/health') return json(res, 200, {
+        ok: true, configured: config.configured, mode: 'free',
+        gemini: {
+          keyPresent: Boolean(config.geminiKey),
+          freeTierConfirmed: config.geminiFreeTier === true,
+          enabled: config.geminiEnabled === true,
+        },
+      });
       if (!['/api/lexicon', '/api/feedback'].includes(pathname)) throw new ApiError(404, 'not_found', 'This API route does not exist.');
       if (req.method !== 'POST') throw new ApiError(405, 'method_not_allowed', 'Use POST for this API route.');
       if (!config.configured) throw new ApiError(503, 'service_not_configured', 'The language service is awaiting deployment configuration.');

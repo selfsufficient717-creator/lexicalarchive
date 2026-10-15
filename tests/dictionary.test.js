@@ -268,3 +268,148 @@ test('multiline pasted expressions normalize whitespace while preserving the ful
   assert.equal(card.term, 'break the ice');
   assert.match(calls[0].url.pathname, /break%20the%20ice$/);
 });
+
+const exactMiss = url => url.origin === dictionaryHost || url.pathname.includes('rest_v1')
+  ? json({}, 404) : json({ error: { code: 'missingtitle' } });
+const requestedSpelling = url => url.searchParams.get('page') || decodeURIComponent(url.pathname.split('/').at(-1));
+
+for (const term of ['Incontrovertible', 'INCONTROVERTIBLE']) test(`a lowercase retry finds ${term} while preserving the pasted spelling`, async () => {
+  const { fetchImpl, calls } = fixture(url => url.origin === dictionaryHost && requestedSpelling(url) === 'incontrovertible'
+    ? json(definition('incontrovertible', { definition: 'Impossible to dispute.', example: 'The evidence was incontrovertible.', synonyms: [], antonyms: [] }))
+    : exactMiss(url));
+  const card = await createLexicon(config, fetchImpl, request(term));
+  assert.equal(card.term, term);
+  assert.equal(card.definition, 'Impossible to dispute.');
+  assert.match(card.source.url, /\/incontrovertible$/);
+  assert.match(card.usageNote, /lowercase spelling “incontrovertible”/);
+  assert.match(card.usageNote, /Capitalization can change/);
+  assert.equal(calls.length, 4);
+  assert.equal(requestedSpelling(calls[0].url), term);
+  assert.equal(requestedSpelling(calls[1].url), term);
+  assert.equal(requestedSpelling(calls[2].url), term);
+});
+
+test('title-cased idioms retry the whole lowercase expression and never its component words', async () => {
+  const { fetchImpl, calls } = fixture(url => url.pathname.includes('rest_v1') && requestedSpelling(url) === 'break_the_ice'
+    ? json({ en: [{ partOfSpeech: 'Verb', definitions: [{ definition: '(idiomatic) To make people feel comfortable.', examples: ['A game can break the ice.'] }] }] })
+    : exactMiss(url));
+  const card = await createLexicon(config, fetchImpl, request('Break The Ice'));
+  assert.equal(card.term, 'Break The Ice');
+  assert.equal(card.kind, 'idiom');
+  assert.match(card.source.url, /\/break_the_ice$/);
+  assert.match(card.usageNote, /lowercase spelling “break the ice”/);
+  assert.deepEqual(calls.map(call => requestedSpelling(call.url)), ['Break The Ice', 'Break_The_Ice', 'Break_The_Ice', 'break the ice', 'break_the_ice']);
+});
+
+test('exact-case dictionary entries take precedence over folded responses in the same body', async () => {
+  const { fetchImpl, calls } = fixture(() => json([
+    ...definition('may', { definition: 'To be permitted to do something.' }),
+    ...definition('May', { definition: 'The fifth month of the year.' }),
+  ]));
+  const card = await createLexicon(config, fetchImpl, request('May'));
+  assert.equal(card.definition, 'The fifth month of the year.');
+  assert.equal(calls.length, 1);
+  assert.doesNotMatch(card.usageNote, /lowercase spelling/);
+});
+
+test('an exact proper-name Wiktionary entry takes precedence over a lowercase dictionary response', async () => {
+  const { fetchImpl, calls } = fixture(url => url.origin === dictionaryHost
+    ? json(definition('may', { definition: 'To be permitted to do something.' }))
+    : json({ en: [{ partOfSpeech: 'Proper noun', definitions: [{ definition: 'The fifth month of the year.' }] }] }));
+  const month = await createLexicon(config, fetchImpl, request('May'));
+  const modal = await createLexicon(config, fetchImpl, request('may'));
+  assert.equal(month.definition, 'The fifth month of the year.');
+  assert.match(month.source.url, /\/May$/);
+  assert.doesNotMatch(month.usageNote, /lowercase spelling/);
+  assert.equal(modal.definition, 'To be permitted to do something.');
+  assert.match(modal.source.url, /\/may$/);
+  assert.equal((await createLexicon(config, fetchImpl, request('May'))).definition, month.definition);
+  assert.equal(calls.length, 3);
+});
+
+test('an exact-case stable Wiktionary entry is used before a lowercase retry despite a REST outage', async () => {
+  const { fetchImpl, calls } = fixture(url => {
+    if (url.origin === dictionaryHost) return json({}, 404);
+    if (url.pathname.includes('rest_v1')) return json({}, 503);
+    assert.equal(url.searchParams.get('page'), 'May');
+    if (url.searchParams.get('prop') === 'sections') return json({ parse: { sections: [{ line: 'English', index: '1' }] } });
+    return json({ parse: { text: { '*': '<h3>Proper noun</h3><ol><li>The fifth month of the year.</li></ol>' } } });
+  });
+  const card = await createLexicon(config, fetchImpl, request('May'));
+  assert.equal(card.definition, 'The fifth month of the year.');
+  assert.match(card.source.url, /\/May$/);
+  assert.equal(calls.length, 4);
+  assert.doesNotMatch(card.usageNote, /lowercase spelling/);
+});
+
+test('dictionary and translation caches keep abbreviation and ordinary-word case distinct', async () => {
+  const { fetchImpl, calls } = fixture(url => {
+    const term = url.origin === dictionaryHost ? requestedSpelling(url) : url.searchParams.get('q');
+    if (url.origin === dictionaryHost) return json(definition(term, { definition: term === 'US' ? 'The United States.' : 'The object form of we.' }));
+    return json({ responseStatus: 200, responseData: { translatedText: term === 'US' ? 'США' : 'нас' } });
+  });
+  const abbreviation = await createLexicon(config, fetchImpl, request('US', 'Russian'));
+  const pronoun = await createLexicon(config, fetchImpl, request('us', 'Russian'));
+  assert.equal(abbreviation.definition, 'The United States.');
+  assert.equal(abbreviation.translation, 'США');
+  assert.equal(pronoun.definition, 'The object form of we.');
+  assert.equal(pronoun.translation, 'нас');
+  assert.equal((await createLexicon(config, fetchImpl, request('US', 'Russian'))).translation, 'США');
+  assert.equal(calls.length, 4);
+});
+
+test('a verified lowercase reading is available during original-case outages with an explicit qualification', async () => {
+  const { fetchImpl, calls } = fixture(url => {
+    if (url.origin === dictionaryHost && requestedSpelling(url) === 'incontrovertible') return json(definition('incontrovertible', { definition: 'Impossible to dispute.' }));
+    return url.pathname.includes('rest_v1') ? json({}, 503) : exactMiss(url);
+  });
+  const card = await createLexicon(config, fetchImpl, request('Incontrovertible'));
+  assert.equal(card.term, 'Incontrovertible');
+  assert.equal(card.definition, 'Impossible to dispute.');
+  assert.match(card.source.url, /\/incontrovertible$/);
+  assert.match(card.usageNote, /exact capitalization could not be fully checked/);
+  assert.match(card.usageNote, /lowercase spelling “incontrovertible”/);
+  assert.equal(calls.length, 4);
+});
+
+test('lowercase fallback during an outage does not cache over a proper entry after recovery', async () => {
+  let recovered = false;
+  const { fetchImpl, calls } = fixture(url => {
+    if (url.origin === dictionaryHost) return json(definition('may', { definition: 'To be permitted to do something.' }));
+    if (recovered && url.pathname.includes('rest_v1')) return json({ en: [{ partOfSpeech: 'Proper noun', definitions: [{ definition: 'The fifth month of the year.' }] }] });
+    return json({}, 503);
+  });
+  const fallback = await createLexicon(config, fetchImpl, request('May'));
+  assert.equal(fallback.definition, 'To be permitted to do something.');
+  assert.match(fallback.usageNote, /exact capitalization could not be fully checked/);
+  recovered = true;
+  const exact = await createLexicon(config, fetchImpl, request('May'));
+  assert.equal(exact.definition, 'The fifth month of the year.');
+  assert.match(exact.source.url, /\/May$/);
+  assert.doesNotMatch(exact.usageNote, /lowercase spelling/);
+  assert.equal(calls.length, 6);
+});
+
+for (const [label, unavailable] of [
+  ['original dictionary', url => url.origin === dictionaryHost && requestedSpelling(url) === 'Unknown'],
+  ['original REST dictionary', url => url.pathname.includes('rest_v1') && requestedSpelling(url) === 'Unknown'],
+  ['lowercase dictionary', url => url.origin === dictionaryHost && requestedSpelling(url) === 'unknown'],
+  ['lowercase stable dictionary', url => url.pathname === '/w/api.php' && requestedSpelling(url) === 'unknown'],
+]) test(`an ${label} outage plus other spelling misses remains a recoverable error`, async () => {
+  const { fetchImpl, calls } = fixture(url => unavailable(url) ? json({}, 503) : exactMiss(url));
+  await assert.rejects(createLexicon(config, fetchImpl, request('Unknown')), error => error.status === 502 && error.code === 'dictionary_unavailable');
+  assert.equal(calls.length, 6);
+});
+
+test('capitalized whole-expression misses return manual guidance only after both spellings miss', async () => {
+  const { fetchImpl, calls } = fixture(exactMiss);
+  await assert.rejects(createLexicon(config, fetchImpl, request('An Unknown Expression')), error => error.status === 404 && error.code === 'dictionary_not_found');
+  assert.equal(calls.length, 6);
+  assert.deepEqual(calls.map(call => requestedSpelling(call.url)), ['An Unknown Expression', 'An_Unknown_Expression', 'An_Unknown_Expression', 'an unknown expression', 'an_unknown_expression', 'an_unknown_expression']);
+});
+
+test('a malformed successful provider response is unavailable rather than proof of absence', async () => {
+  const { fetchImpl } = fixture(url => url.origin === dictionaryHost ? json({}, 404)
+    : url.pathname.includes('rest_v1') ? json({}, 404) : json({}));
+  await assert.rejects(createLexicon(config, fetchImpl, request('unknown')), error => error.status === 502 && error.code === 'dictionary_unavailable');
+});

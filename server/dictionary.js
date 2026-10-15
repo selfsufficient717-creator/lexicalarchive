@@ -36,7 +36,8 @@ export function plainText(value, max = 2500) {
     .replace(/\s+/g, ' ').trim().slice(0, max);
 }
 
-const normalized = value => value.normalize('NFKC').toLocaleLowerCase('en').replace(/[’]/g, "'").replace(/_/g, ' ').replace(/\s+/g, ' ').trim();
+const spelling = value => value.normalize('NFKC').replace(/[’]/g, "'").replace(/_/g, ' ').replace(/\s+/g, ' ').trim();
+const normalized = value => spelling(value).toLocaleLowerCase('en');
 function unique(values, limit = 8, max = 300) {
   const seen = new Set();
   return values.flatMap(value => {
@@ -78,7 +79,9 @@ async function fetchJson(fetchImpl, url) {
 function dictionaryEntry(body, term) {
   if (!Array.isArray(body)) return null;
   for (const entry of body.slice(0, 20)) {
-    if (!entry || typeof entry.word !== 'string' || normalized(entry.word) !== normalized(term)) continue;
+    // Case can distinguish a name or abbreviation from another lexical item
+    // (May/may, US/us). A lowercase retry is explicit, after exact sources miss.
+    if (!entry || typeof entry.word !== 'string' || spelling(entry.word) !== spelling(term)) continue;
     for (const meaning of list(entry.meanings)) {
       const definitions = list(meaning?.definitions).filter(value => plainText(value?.definition));
       if (!definitions.length) continue;
@@ -194,22 +197,43 @@ function actionUrl(term, fields) {
   return url.href;
 }
 
-async function lookup(fetchImpl, term) {
+async function lookupExact(fetchImpl, term) {
   const dictionary = await fetchJson(fetchImpl, `${DICTIONARY}${encodeURIComponent(term)}`);
   const first = dictionary.ok && dictionaryEntry(dictionary.body, term);
-  if (first) return first;
+  if (first) return { entry: first };
   const wiki = await fetchJson(fetchImpl, `${WIKTIONARY}/api/rest_v1/page/definition/${encodeURIComponent(term.replace(/\s+/g, '_'))}`);
   const second = wiki.ok && wiktionaryEntry(wiki.body, term);
-  if (second) return second;
+  if (second) return { entry: second };
   const sections = await fetchJson(fetchImpl, actionUrl(term, { prop: 'sections' }));
   const english = sections.ok && list(sections.body?.parse?.sections).find(section => plainText(section.line) === 'English' && /^\d+$/.test(String(section.index)));
   if (english) {
     const parsed = await fetchJson(fetchImpl, actionUrl(term, { prop: 'text', section: String(english.index), disableeditsection: '1' }));
     const third = parsed.ok && actionEntry(parsed.body?.parse?.text?.['*'], term);
-    if (third) return third;
+    if (third) return { entry: third };
   }
-  const missing = (dictionary.status === 404 && wiki.status === 404) || sections.body?.error?.code === 'missingtitle';
-  if (missing || (sections.ok && !english)) throw new ApiError(404, 'dictionary_not_found', 'No English dictionary entry was found for that exact word or phrase. You can add it manually with the meaning and context you found.');
+  // A missing page is different from an outage or malformed response. Require
+  // consistent absence across providers before calling the item missing.
+  const dictionaryMissing = dictionary.status === 404 || (dictionary.ok && Array.isArray(dictionary.body));
+  const wikiRestMissing = wiki.status === 404 || (wiki.ok && wiki.body && !Array.isArray(wiki.body)
+    && Object.values(wiki.body).some(Array.isArray));
+  const wikiMissing = wikiRestMissing && sections.ok && (sections.body?.error?.code === 'missingtitle'
+    || (Array.isArray(sections.body?.parse?.sections) && !english));
+  return { missing: dictionaryMissing && wikiMissing };
+}
+
+async function lookup(fetchImpl, term) {
+  const original = await lookupExact(fetchImpl, term);
+  if (original.entry) return original.entry;
+  const lowercase = term.toLocaleLowerCase('en');
+  let missing = original.missing;
+  if (lowercase !== term) {
+    // Retry the complete expression only. Looking up individual words would
+    // replace the meaning of an idiom or phrase with unrelated component data.
+    const fallback = await lookupExact(fetchImpl, lowercase);
+    if (fallback.entry) return { ...fallback.entry, lookupTerm: lowercase, originalLookupUnavailable: !original.missing };
+    missing &&= fallback.missing;
+  }
+  if (missing) throw new ApiError(404, 'dictionary_not_found', 'No English dictionary entry was found for that word or phrase, including its lowercase spelling. You can add it manually with the meaning and context you found.');
   throw new ApiError(502, 'dictionary_unavailable', 'The free dictionaries are temporarily unavailable. Please try again later or add this item manually.');
 }
 
@@ -219,7 +243,7 @@ async function translate(fetchImpl, term, language) {
   if (!target) return { translation: '', translationNote: 'This translation language is not supported by the free lookup. You can add your own translation.' };
   if (Buffer.byteLength(term, 'utf8') > 500) return { translation: '', translationNote: 'This phrase exceeds the free translation service’s 500-byte request limit. You can add your own translation.' };
   const cache = cacheFor(translations, fetchImpl);
-  const key = `${normalized(term)}:${target}`;
+  const key = `${spelling(term)}:${target}`;
   const previous = cached(cache, key);
   if (previous) return previous;
   const url = new URL(TRANSLATION);
@@ -274,9 +298,14 @@ export async function createLexicon(_config, fetchImpl, request) {
   const language = typeof request.language === 'string' && request.language.trim() ? request.language.trim().slice(0, 80) : 'English';
   const context = typeof request.context === 'string' ? request.context.trim().slice(0, 2500) : '';
   const cache = cacheFor(dictionaries, fetchImpl);
-  const key = normalized(term);
+  const key = spelling(term);
   let entry = cached(cache, key);
-  if (!entry) { entry = await lookup(fetchImpl, term); remember(cache, key, entry, dictionaryTtl); }
+  if (!entry) {
+    entry = await lookup(fetchImpl, term);
+    // Recheck capitalization after an outage instead of retaining a possibly
+    // different lowercase reading for the normal six-hour cache lifetime.
+    if (!entry.originalLookupUnavailable) remember(cache, key, entry, dictionaryTtl);
+  }
   const translation = await translate(fetchImpl, term, language);
   const examples = [...entry.examples];
   const examplesSource = examples.map(() => entry.source.name);
@@ -291,7 +320,7 @@ export async function createLexicon(_config, fetchImpl, request) {
     synonyms: entry.synonyms, antonyms: entry.antonyms, antonymNote: relationNote,
     examples, examplesSource,
     examplesNote: entry.examples.length ? 'These examples are quoted from the dictionary source.' : context && examples.length ? 'This is your supplied context, not an independently verified example.' : 'The dictionary did not provide an example for this sense. Add the sentence or passage where you found it.',
-    usageNote: `${entry.partOfSpeech ? `${entry.partOfSpeech}. ` : ''}Dictionary wording is shown without AI rewriting.${entry.senses > 1 ? ` This entry has ${entry.senses} senses; the first is shown. Your context has not been automatically interpreted.` : ''}`,
+    usageNote: `${entry.partOfSpeech ? `${entry.partOfSpeech}. ` : ''}Dictionary wording is shown without AI rewriting.${entry.lookupTerm ? `${entry.originalLookupUnavailable ? ' The exact capitalization could not be fully checked because a dictionary was unavailable.' : ''} This card uses the lowercase spelling “${entry.lookupTerm}”. Capitalization can change the meaning of names and abbreviations.` : ''}${entry.senses > 1 ? ` This entry has ${entry.senses} senses; the first is shown. Your context has not been automatically interpreted.` : ''}`,
     speakingPrompt: `Describe a real or imagined situation in which “${term}” would be useful. Explain what happened and why this expression fits. Speak for 60–120 seconds and use it naturally.`,
     writingPrompt: `Write 120–200 words about a real or imagined situation in which “${term}” would be useful. Explain your ideas clearly and use this expression naturally.`,
     exercises: exercisesFor(term, entry, context), source: entry.source,

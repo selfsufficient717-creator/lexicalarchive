@@ -4,7 +4,7 @@ Node 24 HTTP service with Supabase authentication, dictionary lookup, basic coac
 
 `npm start` respects environment proxies and CA trust. `SUPABASE_URL` and `SUPABASE_ANON_KEY` configure accounts/data; `ALLOWED_ORIGIN` is the exact Pages origin. See [../DEPLOYMENT.md](../DEPLOYMENT.md) for free Render setup and the optional Gemini key/explicit free-tier flag. Keep Google billing disabled.
 
-- `GET /api/health`: `{ok:true,configured:boolean,mode:"free"}` reports settings presence only.
+- `GET /api/health`: reports `ok`, Supabase `configured`, `mode:"free"`, and Gemini setup flags `{keyPresent,freeTierConfirmed,enabled}`. These are presence checks only, never key values or a live model/billing check.
 - `POST /api/lexicon`: authenticated `{text,context,language}`. Gemini is used only with the owner-confirmed free-tier flag and key; otherwise, or on an AI failure, Free Dictionary API/Wiktionary supply actual entries and optional MyMemory translations.
 - `POST /api/feedback`: authenticated `{itemId,mode,item,prompt,response?,audio?,transcript?,transcriptConfirmed?,previousAttempts?}`. Saved item, prompt and attempt history are authoritative. Gemini receives the actual WAV if enabled. On fallback, rule-based coaching reports measurable patterns with null scores and clear limitations.
 

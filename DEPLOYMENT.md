@@ -65,3 +65,9 @@ After deployment:
 5. Submit writing and recorded speaking through all three attempts. With no Gemini, confirm feedback is labeled basic coaching, pronunciation is ungraded, and corrections cite only observed patterns.
 6. If free Gemini is configured, test an arbitrary phrase, generated exercises, actual audio feedback, and a quota outage that returns a clearly labeled fallback.
 7. Check profile photo ownership and second-account privacy. Do not describe mocked test results as live provider verification.
+
+## Lookup troubleshooting
+
+Capitalized words and phrases are checked with their original spelling first, then their complete lowercase spelling. Exact entries take priority; a lowercase fallback is explicitly labeled. Case-sensitive meanings and their cached translations stay separate. A failed provider is reported as unavailable rather than evidence that a word does not exist.
+
+Open `https://lexical-trove-api.onrender.com/api/health` to inspect the safe `gemini` flags. `keyPresent:false` means the Render key variable is missing/blank; `freeTierConfirmed:false` means its explicit free-tier flag is not set to `true`; `enabled:true` only means those settings are present, not that the key/model/quota works. Never send the actual key. Render logs use the safe `gemini_fallback` event and a category for quota, permissions, missing model, or invalid response. If dictionaries also fail, the app preserves the AI fallback reason.

@@ -111,7 +111,7 @@ function upstream({ authStatus = 200, confirmed = true, missingItem = false, ini
       if (decodeURIComponent(parsed.pathname).endsWith('/definition/break_the_ice')) {
         return Response.json({ en: [{ partOfSpeech: 'Verb', definitions: [{ definition: '(idiomatic) To make people feel more comfortable in a new social situation.', examples: ['We played a game to break the ice.'] }] }] });
       }
-      return Response.json({ error: { code: 'missingtitle', info: 'The page is missing.' } }, { status: 404 });
+      return Response.json({ error: { code: 'missingtitle', info: 'The page is missing.' } }, { status: parsed.pathname === '/w/api.php' ? 200 : 404 });
     }
     throw new Error(`Unapproved network destination: ${parsed.hostname}`);
   };
@@ -152,7 +152,7 @@ test('free health and configuration require no paid key and do not leak a leftov
   const response = await fetch(`${api.base}/api/health`);
   assert.equal(response.status, 200);
   const text = await response.text();
-  assert.deepEqual(JSON.parse(text), { ok: true, configured: true, mode: 'free' });
+  assert.deepEqual(JSON.parse(text), { ok: true, configured: true, mode: 'free', gemini: { keyPresent: false, freeTierConfirmed: false, enabled: false } });
   assert.doesNotMatch(text, /obsolete-secret|sb_publishable/);
   assert.equal(api.calls.length, 0);
   const lookup = await api.request('/api/lexicon', { text: 'ceasefire', language: 'English' });
@@ -494,4 +494,48 @@ test('a Gemini key alone never enables AI unless free-tier mode is explicitly ac
     assert.equal(config.geminiEnabled, false);
     assert.equal(config.configured, true);
   }
+});
+
+test('public diagnostics report only Gemini setup presence, without testing or exposing its key', async t => {
+  for (const [key, flag, expected] of [
+    ['', 'false', { keyPresent: false, freeTierConfirmed: false, enabled: false }],
+    ['private-test-gemini-key', 'false', { keyPresent: true, freeTierConfirmed: false, enabled: false }],
+    ['private-test-gemini-key', 'true', { keyPresent: true, freeTierConfirmed: true, enabled: true }],
+  ]) {
+    const api = await start(t, { config: readConfig({ ...configEnv, LEXICAL_GEMINI_API_KEY: key, GEMINI_FREE_TIER: flag }) });
+    const response = await fetch(`${api.base}/api/health`);
+    const text = await response.text(), result = JSON.parse(text);
+    assert.deepEqual(result.gemini, expected);
+    assert.equal(text.includes('private-test-gemini-key'), false);
+    assert.equal(api.calls.length, 0);
+  }
+});
+
+test('copy/paste whitespace is stripped from the Gemini key and explicit free-tier flag', () => {
+  const config = readConfig({ ...configEnv, LEXICAL_GEMINI_API_KEY: '  private-test-key\n', GEMINI_FREE_TIER: ' true ' });
+  assert.equal(config.geminiKey, 'private-test-key');
+  assert.equal(config.geminiEnabled, true);
+});
+
+test('dictionary misses do not hide the Gemini fallback reason or leak provider content', async t => {
+  const warn = t.mock.method(console, 'warn', () => {});
+  const fake = upstream({ dictionaryStatus: 404 });
+  const app = createApp({
+    config: readConfig({ ...configEnv, LEXICAL_GEMINI_API_KEY: 'private-test-key', GEMINI_FREE_TIER: 'true' }),
+    fetchImpl: async (url, options = {}) => new URL(url).hostname === 'generativelanguage.googleapis.com'
+      ? Response.json({ error: { message: 'private-test-key; private learner content' } }, { status: 429 })
+      : fake.fetchImpl(url, options),
+  });
+  await new Promise(resolve => app.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => { app.close(resolve);app.closeAllConnections(); }));
+  const response = await fetch(`http://127.0.0.1:${app.address().port}/api/lexicon`, { method: 'POST', headers: { Authorization: BEARER, 'Content-Type': 'application/json' }, body: JSON.stringify({ text: 'unattestedword', language: 'English' }) });
+  const text = await response.text(), result = JSON.parse(text);
+  assert.equal(response.status, 404);
+  assert.equal(result.error.code, 'dictionary_not_found');
+  assert.match(result.error.message, /AI has reached its request quota/);
+  assert.match(result.error.message, /dictionary/);
+  const logs = warn.mock.calls.map(call => call.arguments.join(' ')).join('\n');
+  assert.deepEqual(JSON.parse(logs), { event: 'gemini_fallback', code: 'gemini_quota' });
+  assert.equal(`${text}${logs}`.includes('private-test-key'), false);
+  assert.equal(`${text}${logs}`.includes('private learner content'), false);
 });
