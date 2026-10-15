@@ -1,6 +1,6 @@
 import * as services from './services.js';
-import { buildExercises, buildMatchingRound, nextReview } from './practice.js';
-import { VoiceRecorder } from './recorder.js';
+import { buildExercises, buildMatchingRound, checkAnswer, nextReview } from './practice.js';
+import { BrowserTranscriber, VoiceRecorder } from './recorder.js';
 
 const $ = selector => document.querySelector(selector);
 const element = (tag, className = '', text = '') => {
@@ -37,7 +37,7 @@ function readCache() {
 function active() { return state.items.find(item => item.id === state.activeId); }
 function isDue(item) { return !item.review?.dueAt || Date.parse(item.review.dueAt) <= Date.now(); }
 function revokeAudio() { if (state.audio?.url) URL.revokeObjectURL(state.audio.url); state.audio = null; }
-function leaveRecording() { state.recorder?.cancel(); state.recorder = null; state.recording = false; revokeAudio(); }
+function leaveRecording() { state.transcriber?.cancel();state.transcriber = null; state.recorder?.cancel(); state.recorder = null; state.recording = false; revokeAudio(); }
 
 function showView(view) {
   if (state.view === 'practice' && view !== 'practice') { leaveRecording(); state.studioToken++; }
@@ -97,7 +97,7 @@ async function lookup(event) {
   const owner = ownerId();
   state.busy = true;
   $('#lookup-button').disabled = true;
-  status(output, 'Finding the meaning, natural examples, and ways to practise…');
+  status(output, 'Looking up the expression and preparing your practice…');
   try {
     try { localStorage.setItem('lexical-trove-language', language); } catch {}
     const payload = await services.api('/api/lexicon', { text, language, context: $('#context').value.trim() });
@@ -110,7 +110,12 @@ async function lookup(event) {
     cacheItems(); updateCollection(); renderEntry(record);
     status(output, 'Added to your trove. Understanding it is the beginning—now make it stick.');
     $('#entry-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
-  } catch (error) { if (ownerId() === owner) status(output, error.message, true); }
+  } catch (error) {
+    if (ownerId() === owner) {
+      status(output, error.message, true);
+      if (error.code === 'dictionary_not_found') { $('#manual-entry').open = true;$('#manual-term').value = text; }
+    }
+  }
   finally {
     state.busy = false; $('#lookup-button').disabled = false;
     if (state.pendingPaste) { state.pendingPaste = false; setTimeout(() => lookup(), 0); }
@@ -127,12 +132,14 @@ function renderEntry(record) {
   heading.append(pronunciation);
   top.append(heading, button('Listen ♫', () => speak(item.term)));
   const translation = element('div', 'translation');
-  translation.append(element('span', '', item.language), element('strong', '', item.translation));
+  translation.append(element('span', '', item.language), element('strong', '', item.translation || item.translationNote || 'Translation unavailable.'));
+  if (item.translation && item.translationNote) translation.append(element('small', 'muted', item.translationNote));
   const grid = element('div', 'entry-grid');
   const examples = element('section');
   examples.append(element('h3', '', 'In real sentences'));
   const list = element('ol', 'examples');
-  (item.examples || []).forEach(example => list.append(element('li', '', example)));
+  (item.examples || []).forEach((example, index) => { const row = element('li', '', example);if (item.examplesSource?.[index]) row.append(element('small', 'source-label', item.examplesSource[index]));list.append(row); });
+  if (!item.examples?.length) examples.append(element('p', 'muted', item.examplesNote || 'This dictionary entry has no example sentence. You can add your original passage for context.'));
   examples.append(list);
   const relations = element('section');
   for (const [title, values] of [['Similar meanings', item.synonyms], ['Opposites', item.antonyms]]) {
@@ -146,7 +153,16 @@ function renderEntry(record) {
   grid.append(examples, relations);
   const actions = element('div', 'entry-actions');
   actions.append(button('Practise this item →', () => { state.activeId = record.id; state.quiz = null; state.mode = 'quiz'; showView('practice'); }, 'primary'), button('Open my trove', () => showView('library')));
+  if (item.fallbackNote) panel.append(element('p', 'usage-note', item.fallbackNote));
   panel.append(top, element('p', 'entry-definition', item.definition), translation, grid, element('p', 'usage-note', item.usageNote || 'Use the original context to choose the meaning that fits.'), actions);
+  for (const source of [item.source, item.translationSource]) {
+    if (!source) continue;
+    const line = element('p', 'source-label');
+    if (safeAvatar(source.url)) { const link = element('a', '', source.name);link.href = source.url;link.target = '_blank';link.rel = 'noopener noreferrer';line.append(link); }
+    else line.textContent = source.name;
+    if (source.license) { line.append(document.createTextNode(` · ${source.license}`));if (safeAvatar(source.licenseUrl)) { const link = element('a', '', 'License');link.href = source.licenseUrl;link.target = '_blank';link.rel = 'noopener noreferrer';line.append(document.createTextNode(' · '), link); } }
+    panel.append(line);
+  }
 }
 function speak(text) {
   if (!globalThis.speechSynthesis) { notify('Text-to-speech is not available in this browser.', true); return; }
@@ -170,7 +186,7 @@ function renderLibrary() {
   }
   for (const record of filtered) {
     const card = element('article', 'library-card');
-    card.append(element('span', 'badge', record.payload.kind), element('h3', '', record.payload.term), element('p', '', record.payload.definition), element('p', '', record.payload.translation));
+    card.append(element('span', 'badge', record.payload.kind), element('h3', '', record.payload.term), element('p', '', record.payload.definition), element('p', '', record.payload.translation || record.payload.translationNote || ''));
     card.append(element('span', 'due-badge', isDue(record) ? 'Ready for another look' : `Next review ${new Date(record.review.dueAt).toLocaleDateString()}`));
     const actions = element('div', 'card-actions');
     actions.append(button('Explore', () => { state.activeId = record.id; renderEntry(record); showView('discover'); $('#entry-panel').scrollIntoView({ behavior: 'smooth' }); }), button('Practise →', () => { state.activeId = record.id; state.quiz = null; showView('practice'); }), button('Remove', async () => {
@@ -249,7 +265,7 @@ function renderQuiz() {
       result.hidden = false;result.append(element('p', '', `Reference answer: ${exercise.answer}`), element('p', 'muted', exercise.explanation || 'Compare the meaning, rather than exact wording.'));
       check.hidden = true;
       actions.append(button('I remembered it', () => finish(true), 'primary'), button('I need another look', () => finish(false)));
-    } else { await finish(chosen === exercise.answer); }
+    } else { await finish(checkAnswer(chosen, exercise.acceptedAnswers?.length ? exercise.acceptedAnswers : exercise.answer)); }
   }, 'primary');check.disabled = true;
   async function finish(correct) {
     actions.replaceChildren();
@@ -334,7 +350,7 @@ function buildWriting(work, output, record, prompt, attempts, token) {
     const response = textarea.value.trim();
     if (response.split(/\s+/).length < 10) { status(output, 'Write at least 10 words so there is enough to give useful feedback.', true);return; }
     if (!needsServices(output)) return;
-    submit.disabled = true;status(output, 'Reading your response and checking the meaning, flow, and vocabulary…');
+    submit.disabled = true;status(output, 'Reviewing your response and preparing feedback…');
     try {
       await services.api('/api/feedback', { mode: 'writing', itemId: record.id, item: record.payload, prompt, response, previousAttempts: attempts.map(a => ({ response: a.response, feedback: a.feedback })) });
       delete state.drafts[draftKey];
@@ -342,35 +358,47 @@ function buildWriting(work, output, record, prompt, attempts, token) {
     } catch (error) { status(output, error.message, true); }
     finally { submit.disabled = false; }
   }, 'primary');
-  work.append(textarea, info, submit, element('p', 'privacy-note', 'Your response is sent for AI feedback and saved to your account. Feedback is formative, not an exam score.'));
+  work.append(textarea, info, submit, element('p', 'privacy-note', 'Your response is saved to your account. Free-tier AI feedback is used only when configured; otherwise clearly labeled basic coaching checks your draft without an AI service.'));
 }
 function buildSpeaking(work, output, record, prompt, attempts, token) {
-  work.append(element('p', 'recording-note', 'Aim for 30–90 seconds. We’ll listen for fluency, organization, vocabulary use, and pronunciation. You can listen back before sending. Maximum recording: two minutes.'));
+  work.append(element('p', 'recording-note', 'Aim for 30–90 seconds. Listen back before sending. Free-tier AI can assess the audio when connected; basic coaching reports timing and transcript checks without pronunciation grades. Maximum recording: two minutes.'));
+  const autoLabel = element('label', 'check-label');const auto = element('input');auto.type = 'checkbox';auto.id = 'auto-transcribe';auto.disabled = !BrowserTranscriber.supported();autoLabel.append(auto, document.createTextNode('Use optional browser transcription'));
+  const transcriptLabel = element('label', '', 'Transcript · optional, but useful for basic coaching');transcriptLabel.htmlFor = 'speaking-transcript';
+  const transcript = element('textarea');transcript.id = 'speaking-transcript';transcript.rows = 4;transcript.maxLength = 12000;transcript.placeholder = 'After recording, type what you actually said, or correct the browser transcription.';
+  const confirmationLabel = element('label', 'check-label');const confirmation = element('input');confirmation.id = 'transcript-confirmed';confirmation.type = 'checkbox';confirmationLabel.append(confirmation, document.createTextNode('I checked that this transcript matches my recording'));
+  transcript.addEventListener('input', () => { confirmation.checked = false; });
+  work.append(autoLabel, element('p', 'privacy-note', 'Browser transcription is optional and may send speech to your browser provider. You can leave it off and type a transcript yourself.'));
   const controls = element('div', 'record-controls');const timer = element('span', 'record-timer', '0:00');
   const preview = element('audio');preview.controls = true;preview.hidden = true;preview.setAttribute('aria-label', 'Listen to your recording');
   const submit = button(attempts.length ? 'Assess my new recording →' : 'Get speaking feedback →', async () => {
     if (!state.audio || !needsServices(output)) return;
-    submit.disabled = true;recordButton.disabled = true;status(output, 'Listening to your recording and preparing specific feedback…');
+    if (transcript.value.trim() && !confirmation.checked) { status(output, 'Check the transcript and confirm it matches your recording before submitting.', true);return; }
+    submit.disabled = true;recordButton.disabled = true;status(output, 'Preparing feedback for your recording…');
     try {
-      await services.api('/api/feedback', { mode: 'speaking', itemId: record.id, item: record.payload, prompt, audio: { base64: state.audio.base64, format: 'wav' }, durationSeconds: state.audio.durationSeconds, previousAttempts: attempts.map(a => ({ response: a.response, feedback: a.feedback })) });
+      await services.api('/api/feedback', { mode: 'speaking', itemId: record.id, item: record.payload, prompt, audio: { base64: state.audio.base64, format: 'wav' }, durationSeconds: state.audio.durationSeconds, transcript: transcript.value.trim(), transcriptConfirmed: confirmation.checked, previousAttempts: attempts.map(a => ({ response: a.response, feedback: a.feedback })) });
       if (token === state.studioToken) { leaveRecording();state.studioToken++;await renderStudio(); }
     } catch (error) { status(output, error.message, true); }
     finally { submit.disabled = false;recordButton.disabled = false; }
   }, 'primary');submit.disabled = true;
   const recordButton = button('● Start recording', async () => {
     if (state.recording) { await stop();return; }
-    revokeAudio();preview.hidden = true;submit.disabled = true;recordButton.disabled = true;
+    revokeAudio();state.transcriber?.cancel();transcript.value = '';confirmation.checked = false;preview.hidden = true;submit.disabled = true;recordButton.disabled = true;
     const recorder = new VoiceRecorder();state.recorder = recorder;
     try {
       await recorder.start(seconds => { timer.textContent = `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, '0')}`; }, () => stop());
       if (token !== state.studioToken) { recorder.cancel();return; }
-      state.recording = true;recordButton.textContent = '■ Stop recording';recordButton.classList.add('recording');status(output, 'Recording on this device. Stop when you’re ready.');
+      state.recording = true;
+      if (auto.checked) {
+        state.transcriber = new BrowserTranscriber();
+        try { state.transcriber.start(text => { transcript.value = text;confirmation.checked = false; }, message => status(output, message)); } catch (error) { status(output, error.message); }
+      }
+      recordButton.textContent = '■ Stop recording';recordButton.classList.add('recording');status(output, 'Recording on this device. Stop when you’re ready.');
     } catch (error) { status(output, error.name === 'NotAllowedError' ? 'Microphone access was declined. Allow access in your browser to record a response.' : error.message, true); }
     finally { recordButton.disabled = false; }
   }, 'record-button');
   async function stop() {
     if (!state.recording) return;
-    state.recording = false;recordButton.disabled = true;status(output, 'Preparing your recording…');
+    state.recording = false;state.transcriber?.stop();recordButton.disabled = true;status(output, 'Preparing your recording…');
     try {
       const audio = await state.recorder.stop();
       if (token !== state.studioToken) { URL.revokeObjectURL(audio.url);return; }
@@ -378,28 +406,28 @@ function buildSpeaking(work, output, record, prompt, attempts, token) {
     } catch (error) { status(output, error.message, true); }
     finally { recordButton.textContent = '● Record again';recordButton.classList.remove('recording');recordButton.disabled = false; }
   }
-  controls.append(recordButton, timer);work.append(controls, preview, submit, element('p', 'privacy-note', 'Your microphone is used only while recording. Submitting sends audio to the learning service and AI provider. We save the transcript and feedback, not the audio. Accent variation is not a mistake.'));
+  controls.append(recordButton, timer);work.append(controls, preview, transcriptLabel, transcript, confirmationLabel, submit, element('p', 'privacy-note', 'Submitting sends your recording to the learning service. If free-tier Gemini is configured, it also processes the audio; otherwise basic checks run on our server. The app saves your transcript and feedback, not the audio. Accent variation is not a mistake.'));
 }
 function renderFeedback(feedback, number) {
   const section = element('section', 'feedback');
-  section.append(element('p', 'eyebrow', `FEEDBACK · ATTEMPT ${number}`), element('h3', '', 'Overall impression'), element('p', 'overall', feedback.overall));
+  section.append(element('p', 'eyebrow', `${feedback.method === 'rules' ? 'BASIC COACHING' : 'FEEDBACK'} · ATTEMPT ${number}`), element('h3', '', 'Overall impression'), element('p', 'overall', feedback.overall));
   let comparison;
   if (feedback.comparison) { comparison = element('div', 'comparison');comparison.append(element('strong', '', 'What changed'), element('p', '', feedback.comparison)); }
   let criteriaGrid;
   if (feedback.criteria?.length) {
     const grid = element('div', 'criteria-grid');
-    feedback.criteria.forEach(criterion => { const card = element('div', 'criterion');const title = element('div', 'criterion-title');title.append(element('span', '', criterion.name), element('span', '', criterion.score == null ? 'Not assessable' : `${criterion.score} / 5`));card.append(title, element('p', '', criterion.comment));grid.append(card); });criteriaGrid = grid;
+    feedback.criteria.forEach(criterion => { const card = element('div', 'criterion');const title = element('div', 'criterion-title');title.append(element('span', '', criterion.name), element('span', '', criterion.score == null ? 'Not graded' : `${criterion.score} / 5`));card.append(title, element('p', '', criterion.comment));grid.append(card); });criteriaGrid = grid;
   }
   section.append(element('h3', '', 'One improvement at a time'));
   const mistakes = element('ol', 'mistake-list');
   (feedback.mistakes || []).forEach(mistake => { const row = element('li');for (const [label, value] of [['Mistake', mistake.mistake], ['Why?', mistake.why], ['How to improve', mistake.improvement]]) { const p = element('p');p.append(element('strong', '', `${label} `), document.createTextNode(value));row.append(p); }mistakes.append(row); });
-  if (mistakes.children.length) section.append(mistakes);else section.append(element('p', 'muted', 'No specific errors identified in this response.'));
+  if (mistakes.children.length) section.append(mistakes);else section.append(element('p', 'muted', feedback.method === 'rules' ? 'No issues detected by these basic checks. Meaning and grammar still need your own review.' : 'No specific errors identified in this response.'));
   if (criteriaGrid) section.append(criteriaGrid);
   if (comparison) section.append(comparison);
   if (feedback.nextSteps?.length) { section.append(element('h4', 'subheading', 'Try this next'));const list = element('ul');feedback.nextSteps.forEach(step => list.append(element('li', '', step)));section.append(list); }
   if (feedback.transcript) { const transcript = element('details');transcript.append(element('summary', '', 'Read the recording transcript'), element('p', 'transcript', feedback.transcript));section.append(transcript); }
   (feedback.limitations || []).forEach(limit => section.append(element('p', 'feedback-limit', limit)));
-  section.append(element('p', 'feedback-limit', 'These 1–5 ratings are learning guidance, not standardized test results.'));
+  section.append(element('p', 'feedback-limit', feedback.method === 'rules' ? 'Basic coaching uses measurements and simple checks. It does not assign examiner scores or judge pronunciation, naturalness, factual accuracy, or semantic correctness.' : 'These 1–5 ratings are learning guidance, not standardized test results.'));
   return section;
 }
 
@@ -453,6 +481,38 @@ function openAccount() {
     }
   }));
 }
+async function addManualItem(event) {
+  event.preventDefault();
+  const out = $('#manual-status');
+  if (!needsServices(out)) return;
+  const owner = ownerId(), term = $('#manual-term').value.trim(), definition = $('#manual-definition').value.trim();
+  if (!term || !definition) { status(out, 'Add your expression and its meaning first.', true);return; }
+  const submit = $('#manual-form button');submit.disabled = true;
+  try {
+    const language = $('#language').value.trim() || 'English';
+    const translation = $('#manual-translation').value.trim();
+    const example = $('#manual-example').value.trim();
+    const payload = {
+      term, kind: /\s/.test(term) ? 'phrase' : 'word', pronunciation: '', definition,
+      translation, language, translationNote: translation ? 'Your own translation.' : 'No translation supplied.',
+      synonyms: [], antonyms: [], antonymNote: 'No opposite has been supplied for this entry.',
+      examples: example ? [example] : [], examplesSource: example ? ['Your own source sentence'] : [],
+      examplesNote: 'No example has been supplied. You can revisit your original source.',
+      usageNote: 'This is your own entry. Check its meaning and usage against your source.',
+      speakingPrompt: `Tell a short real or imagined story where “${term}” fits. Explain the situation, the main event, and what you learned.`,
+      writingPrompt: `Describe a situation that illustrates “${term}”. Explain the context and a consequence, using the expression naturally.`,
+      exercises: [], method: 'manual', source: { name: 'Your own entry', url: '' },
+    };
+    const record = { id: crypto.randomUUID(), payload, review: { dueAt: new Date().toISOString(), intervalDays: 0, streak: 0, reviewCount: 0 } };
+    await services.saveItem(record);
+    if (ownerId() !== owner) return;
+    state.items.unshift(record);if (state.view === 'discover') state.activeId = record.id;cacheItems();updateCollection();renderEntry(record);
+    status(out, 'Saved to your trove. You can practise this expression like any other item.');
+    $('#manual-entry').open = false;$('#entry-panel').scrollIntoView({ behavior: 'smooth' });
+  } catch (error) { if (ownerId() === owner) status(out, error.message, true); }
+  finally { submit.disabled = false; }
+}
+$('#manual-form').addEventListener('submit', addManualItem);
 $('#capture-form').addEventListener('submit', lookup);
 let pasteTimer;
 $('#lexical-input').addEventListener('paste', () => {

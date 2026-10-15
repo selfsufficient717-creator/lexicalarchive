@@ -1,4 +1,4 @@
-// Public configuration only. Never put an OpenAI key or Supabase service-role key here.
+// Public configuration only. Never put any AI provider key or Supabase service-role key here.
 // Public connection settings for the services described in DEPLOYMENT.md.
 export const CONFIG = Object.freeze({
   apiBaseUrl: 'https://lexical-trove-api.onrender.com',

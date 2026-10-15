@@ -4,7 +4,7 @@ Run: python tests/browser_smoke.py
 Requires Python Playwright and Chromium (CHROMIUM_PATH overrides the executable).
 The runner uses an existing app on BROWSER_BASE_URL, or starts its own local static
 server. Every Supabase/AI request is mocked; this does not validate AI quality or
-live email delivery. Screenshots are written to /tmp/lexical-trove-*.png.
+live email delivery. Screenshots are written to /tmp/lexical-trove-free-*.png.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ import functools
 import http.server
 import json
 import os
+import re
 from pathlib import Path
 import threading
 import time
@@ -25,6 +26,7 @@ from playwright.sync_api import sync_playwright, expect
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = json.loads((ROOT / "tests/browser_fixtures.json").read_text())
+ACTUAL_CONFIG = dict(re.findall(r"(apiBaseUrl|supabaseUrl|supabaseAnonKey):\s*'([^']*)'", (ROOT / "config.js").read_text()))
 SUPABASE = "https://test-project.supabase.co"
 USER = {"id": "fixture-user", "email": "learner@example.test"}
 PUBLIC_KEY = "sb_publishable_browser_fixture_only"
@@ -39,8 +41,11 @@ class QuietHandler(http.server.SimpleHTTPRequestHandler):
 
 
 class MockServices:
-    def __init__(self, base_url, configured=True, auth_valid=True):
+    def __init__(self, base_url, configured=True, auth_valid=True, actual_config=False):
         self.base_url = base_url.rstrip("/")
+        self.actual_config = actual_config
+        self.api_base_url = ACTUAL_CONFIG["apiBaseUrl"].rstrip("/") if actual_config else self.base_url
+        self.supabase = ACTUAL_CONFIG["supabaseUrl"].rstrip("/") if actual_config else SUPABASE
         self.configured = configured
         self.auth_valid = auth_valid
         self.items = []
@@ -49,6 +54,7 @@ class MockServices:
         self.requests = []
         self.unexpected = []
         self.lookup_delays = {}
+        self.lookup_failures = {}
 
     def install(self, context):
         context.route("**/*", self.route)
@@ -63,11 +69,14 @@ class MockServices:
         request = route.request
         parsed = urlparse(request.url)
         if parsed.path.endswith("/config.js") and request.url.startswith(self.base_url):
+            if self.actual_config:
+                route.continue_()
+                return
             config = {"apiBaseUrl": self.base_url, "supabaseUrl": SUPABASE, "supabaseAnonKey": PUBLIC_KEY} if self.configured else {"apiBaseUrl": "", "supabaseUrl": "", "supabaseAnonKey": ""}
             route.fulfill(status=200, content_type="text/javascript", body="export const CONFIG = " + json.dumps(config) + ";")
             return
-        is_supabase = request.url.startswith(SUPABASE + "/")
-        is_api = request.url.startswith(self.base_url + "/api/")
+        is_supabase = request.url.startswith(self.supabase + "/")
+        is_api = request.url.startswith(self.api_base_url + "/api/")
         if not is_supabase and not is_api:
             if request.url.startswith(self.base_url + "/"):
                 route.continue_()
@@ -113,12 +122,16 @@ class MockServices:
         elif path.startswith("/storage/v1/object/avatars/"):
             self.fulfill(route, {"Key": path})
         elif path == "/api/lexicon":
+            if body["text"] in self.lookup_failures:
+                error_status, error_code, message = self.lookup_failures[body["text"]]
+                self.fulfill(route, {"error": {"code": error_code, "message": message}}, error_status)
+                return
             # Delay the mocked response while browser timers remain active, so
             # queued pastes and navigation can exercise genuine in-flight UI.
             delay = self.lookup_delays.pop(body["text"], 0)
             if delay:
                 time.sleep(delay)
-            payload = copy.deepcopy(next((item for item in FIXTURES["items"] if item["term"] == body["text"]), FIXTURES["items"][0]))
+            payload = copy.deepcopy(next((item for item in FIXTURES["items"] + [FIXTURES["dictionaryItem"]] if item["term"] == body["text"]), FIXTURES["items"][0]))
             payload["term"] = body["text"]
             payload["language"] = body["language"]
             self.fulfill(route, payload)
@@ -130,15 +143,19 @@ class MockServices:
             feedback = copy.deepcopy(FIXTURES["feedback"])
             if not previous:
                 feedback["comparison"] = None
-            response = body.get("response", "A ceasefire gives people time to rebuild trust and discuss a lasting agreement.")
+            response = body.get("response", body.get("transcript", ""))
             if body["mode"] == "speaking":
                 feedback["transcript"] = response
+                feedback["overall"] = "Your recording and supplied transcript are available for basic coaching. This free check does not grade speaking quality." if response else "No transcript was supplied, so text patterns cannot be checked. This free check does not grade speaking quality."
+                feedback["metrics"].update({"durationSeconds": body["durationSeconds"], "transcriptProvided": bool(response)})
                 feedback["criteria"] = [
-                    {"name": "Fluency", "score": 4, "comment": "The speech flows with few pauses."},
-                    {"name": "Idea organization", "score": 4, "comment": "The main idea and support are connected."},
-                    {"name": "Lexical item usage", "score": 4, "comment": "The lexical item is accurate."},
-                    {"name": "Pronunciation", "score": 3, "comment": "The words are understandable."},
+                    {"name": "Fluency", "score": None, "comment": "Audio duration and low volume are measured; fluency is not assessed."},
+                    {"name": "Idea organization", "score": None, "comment": "Check the order of ideas yourself; logical connections are not assessed."},
+                    {"name": "Lexical item usage", "score": None, "comment": "The exact expression appears in the supplied transcript; correct use is not assessed." if response else "No transcript was supplied; the check cannot determine whether the target expression was spoken."},
+                    {"name": "Pronunciation", "score": None, "comment": "Not assessed. Basic checks do not recognize pronunciation, accent or intelligibility."},
                 ]
+                if not response:
+                    feedback["mistakes"] = []
             attempt = {"id": f"attempt-{len(self.attempts) + 1}", "user_id": USER["id"], "item_id": body["itemId"], "mode": body["mode"], "attempt_number": len(previous) + 1, "prompt": body["prompt"], "response": response, "feedback": feedback}
             self.attempts.append(attempt)
             self.fulfill(route, {**feedback, "attemptId": attempt["id"], "attemptNumber": attempt["attempt_number"]})
@@ -242,6 +259,74 @@ def main():
             check("invalid confirmation link is removed and cannot create an account session")
             context.close()
 
+            free_lookup = MockServices(base_url)
+            all_mocks.append(free_lookup)
+            context, page = new_page(browser, free_lookup)
+            navigate_signed_in(page, free_lookup)
+            page.locator("#language").fill("Uzbek")
+            page.locator("#lexical-input").fill("serendipity")
+            page.locator("#lookup-button").click()
+            expect(page.locator(".entry-title")).to_have_text("serendipity")
+            expect(page.locator(".entry-definition")).to_have_text(FIXTURES["dictionaryItem"]["definition"])
+            expect(page.locator("#entry-panel")).to_contain_text(FIXTURES["dictionaryItem"]["examplesNote"])
+            expect(page.locator("#entry-panel .examples li")).to_have_count(0)
+            expect(page.locator("#entry-panel .translation")).to_contain_text(FIXTURES["dictionaryItem"]["translationNote"])
+            expect(page.locator("#entry-panel")).to_contain_text(FIXTURES["dictionaryItem"]["source"]["name"])
+            source_links = page.locator("#entry-panel .source-label a")
+            assert source_links.count() == 2
+            assert source_links.nth(0).get_attribute("href") == FIXTURES["dictionaryItem"]["source"]["url"]
+            assert source_links.nth(1).get_attribute("href") == FIXTURES["dictionaryItem"]["source"]["licenseUrl"]
+            expect(page.locator("#entry-panel img, #entry-panel script")).to_have_count(0)
+            assert page.evaluate("window.injected === undefined")
+            assert free_lookup.items[0]["payload"]["method"] == "dictionary"
+            page.screenshot(path="/tmp/lexical-trove-free-dictionary-desktop.png", full_page=True)
+            check("dictionary meaning and safe source attribution render without invented examples or translations")
+
+            free_lookup.lookup_failures["a beautifully obscure phrase"] = (404, "dictionary_not_found", "No English dictionary entry was found. You can add it manually.")
+            page.locator("#lexical-input").fill("a beautifully obscure phrase")
+            page.locator("#lookup-button").click()
+            expect(page.locator("#manual-entry")).to_have_attribute("open", "")
+            expect(page.locator("#manual-term")).to_have_value("a beautifully obscure phrase")
+            expect(page.locator("#manual-definition")).to_be_visible()
+            page.locator("#manual-definition").fill("An unusual expression I want to remember from my reading.")
+            page.locator("#manual-translation").fill("o'ziga xos ibora")
+            page.locator("#manual-example").fill("I found a beautifully obscure phrase while reading an old letter.")
+            page.locator("#manual-form button").click()
+            expect(page.locator(".entry-title")).to_have_text("a beautifully obscure phrase")
+            expect(page.locator("#library-count")).to_have_text("2")
+            assert free_lookup.items[-1]["payload"]["term"] == "a beautifully obscure phrase"
+            assert free_lookup.items[-1]["payload"]["kind"] in ("phrase", "idiom")
+            assert free_lookup.items[-1]["payload"]["translation"] == "o'ziga xos ibora"
+            assert free_lookup.items[-1]["payload"]["examples"] == ["I found a beautifully obscure phrase while reading an old letter."]
+            page.get_by_role("button", name="Practise this item →", exact=True).click()
+            expect(page.locator("#practice-item")).to_have_value(free_lookup.items[-1]["id"])
+            expect(page.locator(".practice-card")).to_contain_text("An unusual expression I want to remember from my reading.")
+            page.reload()
+            expect(page.locator("#library-count")).to_have_text("2")
+            page.locator('nav [data-view="practice"]').click()
+            page.locator("#practice-item").select_option(label="a beautifully obscure phrase")
+            page.locator('[data-mode="writing"]').click()
+            expect(page.get_by_label("Your writing response")).to_be_visible()
+            check("unknown phrases open manual entry, save their context to the cloud, and remain first-class practice items")
+            context.close()
+
+            actual_config = MockServices(base_url, actual_config=True)
+            all_mocks.append(actual_config)
+            context, page = new_page(browser, actual_config)
+            navigate_signed_in(page, actual_config)
+            page.locator("#language").fill("Uzbek")
+            page.locator("#lexical-input").fill("ceasefire")
+            page.locator("#lookup-button").click()
+            expect(page.locator(".entry-title")).to_have_text("ceasefire")
+            actual_calls = actual_config.calls("/api/lexicon", "POST")
+            assert len(actual_calls) == 1
+            assert actual_calls[0]["url"] == ACTUAL_CONFIG["apiBaseUrl"].rstrip("/") + "/api/lexicon"
+            assert urlparse(actual_calls[0]["url"]).hostname == "lexical-trove-api.onrender.com"
+            assert any(call["url"].startswith(ACTUAL_CONFIG["supabaseUrl"] + "/") for call in actual_config.requests)
+            assert all("openai.com" not in call["url"] for call in actual_config.requests)
+            check("shipped public configuration sends authenticated lookups to Render and Supabase without browser AI-provider calls")
+            context.close()
+
             mock = MockServices(base_url)
             all_mocks.append(mock)
             context, page = new_page(browser, mock)
@@ -315,7 +400,7 @@ def main():
             expect(page.locator("#practice-content")).to_contain_text("exercises answered correctly")
             assert len(set(labels)) == 8
             assert next(item for item in mock.items if item["payload"]["term"] == "ceasefire")["review"]["reviewCount"] == 1
-            check("eight quiz styles work, choice checking and recall reveal update spaced review")
+            check("eight supplied free-tier quiz styles work; choices and recall update spaced review")
 
             page.locator('[data-mode="match"]').click()
             for relation in ("meaning", "synonym", "antonym"):
@@ -339,10 +424,13 @@ def main():
                 response = f"A ceasefire helps a community rebuild trust because families can return home safely. Revision {attempt_number} explains how neighbors can discuss shared goals and plan a lasting agreement together."
                 page.get_by_label("Your writing response").fill(response)
                 page.get_by_role("button", name="Get writing feedback →" if attempt_number == 1 else "Assess my revision →", exact=True).click()
-                expect(page.locator(".feedback").first.locator(".eyebrow")).to_have_text(f"FEEDBACK · ATTEMPT {attempt_number}")
+                expect(page.locator(".feedback").first.locator(".eyebrow")).to_have_text(f"BASIC COACHING · ATTEMPT {attempt_number}")
                 feedback = page.locator(".feedback").first
                 assert feedback.locator("h3").first.inner_text() == "Overall impression"
                 expect(feedback.locator(".criterion")).to_have_count(5)
+                assert all("Not graded" in title for title in feedback.locator(".criterion-title").all_text_contents())
+                assert "/ 5" not in feedback.inner_text()
+                expect(feedback).to_contain_text("does not assign examiner scores")
                 expect(feedback.locator(".mistake-list li")).to_have_count(1)
                 mistake_labels = feedback.locator(".mistake-list li strong").all_text_contents()
                 assert mistake_labels == ["Mistake ", "Why? ", "How to improve "], mistake_labels
@@ -359,8 +447,8 @@ def main():
             expect(page.get_by_label("Your writing response")).to_have_count(0)
             assert len([attempt for attempt in mock.attempts if attempt["mode"] == "writing"]) == 3
             assert all(len(call["body"]["previousAttempts"]) == i for i, call in enumerate(mock.calls("/api/feedback", "POST")))
-            page.screenshot(path="/tmp/lexical-trove-writing-desktop.png", full_page=True)
-            check("writing first response plus two revisions persist across reload, ordered feedback, hard three-attempt cap")
+            page.screenshot(path="/tmp/lexical-trove-free-writing-desktop.png", full_page=True)
+            check("writing basic coaching stays ungraded and ordered; two revisions persist with a hard three-attempt cap")
 
             page.locator('[data-mode="speaking"]').click()
             for attempt_number in range(1, 4):
@@ -370,9 +458,25 @@ def main():
                 page.wait_for_timeout(1500)
                 page.get_by_role("button", name="■ Stop recording", exact=True).click()
                 expect(page.get_by_label("Listen to your recording")).to_be_visible()
+                transcript = f"A ceasefire gives people time to rebuild trust and discuss a lasting agreement. Recorded revision {attempt_number} includes a specific community example."
+                page.locator("#speaking-transcript").fill(transcript)
+                if attempt_number == 1:
+                    before_feedback = len(mock.calls("/api/feedback", "POST"))
+                    page.get_by_role("button", name="Get speaking feedback →", exact=True).click()
+                    expect(page.locator("#practice-content .form-status")).to_contain_text("confirm it matches your recording")
+                    assert len(mock.calls("/api/feedback", "POST")) == before_feedback
+                    page.locator("#transcript-confirmed").check()
+                    page.locator("#speaking-transcript").fill(transcript + " I checked this transcript.")
+                    expect(page.locator("#transcript-confirmed")).not_to_be_checked()
+                    check("supplied speech transcript cannot submit until confirmed; editing it clears confirmation")
+                page.locator("#transcript-confirmed").check()
                 page.get_by_role("button", name="Get speaking feedback →" if attempt_number == 1 else "Assess my new recording →", exact=True).click()
-                expect(page.locator(".feedback").first.locator(".eyebrow")).to_have_text(f"FEEDBACK · ATTEMPT {attempt_number}")
-                expect(page.locator(".feedback").first.locator(".criteria-grid")).to_contain_text("Pronunciation")
+                expect(page.locator(".feedback").first.locator(".eyebrow")).to_have_text(f"BASIC COACHING · ATTEMPT {attempt_number}")
+                feedback = page.locator(".feedback").first
+                expect(feedback.locator(".criteria-grid")).to_contain_text("Pronunciation")
+                assert all("Not graded" in title for title in feedback.locator(".criterion-title").all_text_contents())
+                assert "/ 5" not in feedback.inner_text()
+                expect(feedback).to_contain_text("do not recognize pronunciation")
                 expect(page.locator(".feedback").first).to_contain_text("Read the recording transcript")
             expect(page.locator("#practice-content")).to_contain_text("All three attempts are complete")
             assert len([attempt for attempt in mock.attempts if attempt["mode"] == "speaking"]) == 3
@@ -383,10 +487,13 @@ def main():
                 raw = base64.b64decode(audio["base64"])
                 assert audio["format"] == "wav" and raw[:4] == b"RIFF" and raw[8:12] == b"WAVE"
                 assert call["body"]["durationSeconds"] >= 1
-            check("real fake-device microphone records WAV, preview, feedback and two speaking revisions")
+                assert call["body"]["transcriptConfirmed"] is True
+                assert "ceasefire" in call["body"]["transcript"]
+            page.screenshot(path="/tmp/lexical-trove-free-speaking-desktop.png", full_page=True)
+            check("real fake-device microphone records three WAV submissions with confirmed transcripts and ungraded speaking coaching")
 
             page.locator('nav [data-view="discover"]').click()
-            page.screenshot(path="/tmp/lexical-trove-desktop.png", full_page=True)
+            page.screenshot(path="/tmp/lexical-trove-free-desktop.png", full_page=True)
             assert not errors, errors
             context.close()
 
@@ -435,19 +542,86 @@ def main():
             check("pasting during an in-flight lookup queues the latest phrase exactly once")
             context.close()
 
+            signed_out_mock = MockServices(base_url)
+            signed_out_mock.items = copy.deepcopy(mock.items)
+            signed_out_mock.lookup_delays["signed-out lookup"] = 0.8
+            all_mocks.append(signed_out_mock)
+            context, page = new_page(browser, signed_out_mock)
+            navigate_signed_in(page, signed_out_mock)
+            page.locator("#language").fill("Uzbek")
+            page.locator("#lexical-input").fill("signed-out lookup")
+            page.evaluate("""() => {
+                setTimeout(() => {
+                    document.querySelector('#account-button').click();
+                    Array.from(document.querySelectorAll('#account-content button')).find(button => button.textContent === 'Sign out').click();
+                }, 150);
+                document.querySelector('#capture-form').requestSubmit();
+            }""")
+            expect(page.locator("#account-label")).to_have_text("Sign in")
+            expect(page.locator("#lookup-button")).to_be_enabled()
+            expect(page.locator("#library-count")).to_have_text("0")
+            expect(page.locator("#entry-panel")).not_to_be_visible()
+            assert not signed_out_mock.calls("/rest/v1/items", "POST")
+            assert page.evaluate("localStorage.getItem('lexical-trove-session-v1')") is None
+            check("signing out during an in-flight lookup discards its result and clears private account state")
+            context.close()
+
             context, page = new_page(browser, mock, mobile=True)
             navigate_signed_in(page, mock)
-            page.screenshot(path="/tmp/lexical-trove-mobile.png", full_page=True)
+            page.screenshot(path="/tmp/lexical-trove-free-mobile.png", full_page=True)
             assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
             page.locator('nav [data-view="library"]').click()
             expect(page.locator("#library-cards article")).to_have_count(2)
             assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
             select_studio(page, "writing")
             expect(page.locator("#practice-content")).to_contain_text("All three attempts are complete")
-            page.screenshot(path="/tmp/lexical-trove-writing-mobile.png", full_page=True)
+            page.screenshot(path="/tmp/lexical-trove-free-writing-mobile.png", full_page=True)
             assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
             check("390px mobile discovery/library/studio have no horizontal overflow, final attempts survive reload")
             context.close()
+
+            audio_only = MockServices(base_url)
+            audio_only.items = copy.deepcopy(mock.items)
+            all_mocks.append(audio_only)
+            context, page = new_page(browser, audio_only, mobile=True)
+            navigate_signed_in(page, audio_only)
+            select_studio(page, "speaking")
+            expect(page.locator("#auto-transcribe")).not_to_be_checked()
+            expect(page.locator("#speaking-transcript")).to_have_value("")
+            expect(page.locator("#transcript-confirmed")).not_to_be_checked()
+            assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+            page.get_by_role("button", name="● Start recording", exact=True).click()
+            expect(page.get_by_role("button", name="■ Stop recording", exact=True)).to_be_enabled()
+            page.wait_for_timeout(1500)
+            page.get_by_role("button", name="■ Stop recording", exact=True).click()
+            expect(page.get_by_label("Listen to your recording")).to_be_visible()
+            page.get_by_role("button", name="Get speaking feedback →", exact=True).click()
+            feedback = page.locator(".feedback").first
+            expect(feedback.locator(".eyebrow")).to_have_text("BASIC COACHING · ATTEMPT 1")
+            expect(feedback).to_contain_text("No transcript was supplied")
+            expect(feedback.get_by_text("Read the recording transcript", exact=True)).to_have_count(0)
+            expect(feedback.locator(".mistake-list li")).to_have_count(0)
+            assert all("Not graded" in title for title in feedback.locator(".criterion-title").all_text_contents())
+            call = audio_only.calls("/api/feedback", "POST")[0]
+            assert call["body"]["transcript"] == "" and call["body"]["transcriptConfirmed"] is False
+            assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+            page.screenshot(path="/tmp/lexical-trove-free-speaking-mobile.png", full_page=True)
+            check("audio-only basic practice works without a transcript; optional transcription stays off and mobile controls fit")
+            context.close()
+
+            context, page = new_page(browser, free_lookup, mobile=True)
+            navigate_signed_in(page, free_lookup)
+            page.locator('nav [data-view="library"]').click()
+            card = page.locator("#library-cards article").filter(has=page.get_by_role("heading", name="serendipity", exact=True))
+            card.get_by_role("button", name="Explore", exact=True).click()
+            expect(page.locator(".entry-title")).to_have_text("serendipity")
+            page.locator("#manual-entry summary").click()
+            expect(page.locator("#manual-definition")).to_be_visible()
+            assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+            page.screenshot(path="/tmp/lexical-trove-free-dictionary-mobile.png", full_page=True)
+            check("dictionary provenance and the manual expression form fit a 390px mobile screen")
+            context.close()
+
             assert not [url for mocked in all_mocks for url in mocked.unexpected], [url for mocked in all_mocks for url in mocked.unexpected]
             assert all(call["headers"].get("authorization") == "Bearer " + TOKEN for call in mock.requests if "/api/" in call["url"])
             check("no unexpected external requests or browser errors; AI requests carry verified session")

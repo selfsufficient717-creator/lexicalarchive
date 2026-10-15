@@ -2,6 +2,7 @@
   "items": [
     {
       "term": "ceasefire",
+      "method": "gemini-free",
       "kind": "word",
       "pronunciation": "/ˈsiːsfaɪər/",
       "definition": "An agreement to stop fighting, often for a short time.",
@@ -14,6 +15,7 @@
       "usageNote": "Agree to a ceasefire; negotiate a ceasefire; break a ceasefire.",
       "writingPrompt": "Explain how a ceasefire could help a community rebuild trust.",
       "speakingPrompt": "Describe how a community might use a ceasefire to find a lasting solution.",
+      "source": {"name": "Free-tier generated practice (fixture)", "url": "https://ai.google.dev/"},
       "exercises": [
         {"type": "meaning", "question": "Which meaning describes a ceasefire?", "options": ["An agreement to stop fighting.", "A plan to begin fighting.", "A celebration after a journey."], "answer": "An agreement to stop fighting.", "explanation": "Both sides agree to stop fighting."},
         {"type": "synonym", "question": "Choose a similar word.", "options": ["truce", "argument", "arrival"], "answer": "truce", "explanation": "A truce also pauses fighting."},
@@ -39,18 +41,46 @@
       "exercises": []
     }
   ],
+  "dictionaryItem": {
+    "term": "serendipity",
+    "method": "dictionary",
+    "kind": "word",
+    "pronunciation": "/ˌsɛrənˈdɪpɪti/",
+    "definition": "The occurrence of useful or pleasant events by chance.",
+    "translation": "",
+    "translationNote": "Free translation is unavailable or its daily quota has been reached. The English meaning and practice still work; you can add your own translation.",
+    "language": "Uzbek",
+    "examples": [],
+    "examplesNote": "The dictionary did not provide an example for this sense. Add the sentence or passage where you found it.",
+    "synonyms": [],
+    "antonyms": [],
+    "antonymNote": "The source does not list an antonym for this sense. No opposite has been invented.",
+    "usageNote": "Dictionary wording is shown without AI rewriting.",
+    "speakingPrompt": "Describe a real or imagined situation in which serendipity would be useful. Explain what happened and why this expression fits.",
+    "writingPrompt": "Write about a real or imagined situation in which serendipity would be useful. Explain your ideas clearly and use this expression naturally.",
+    "exercises": [],
+    "source": {
+      "name": "<img src=x onerror=window.injected=true> Free Dictionary API",
+      "url": "https://api.dictionaryapi.dev/api/v2/entries/en/serendipity",
+      "license": "CC BY-SA 3.0 <script>window.injected=true</script>",
+      "licenseUrl": "https://creativecommons.org/licenses/by-sa/3.0/"
+    },
+    "translationSource": {"name": "<img src=x onerror=window.injected=true> invalid provider URL", "url": "javascript:window.injected=true"}
+  },
   "feedback": {
-    "overall": "Your main idea is clear and the target vocabulary fits the situation. You can improve how the ideas connect.",
-    "comparison": "Your revision makes the connection between the agreement and rebuilding trust clearer.",
+    "method": "rules",
+    "metrics": {"words": 32, "sentences": 2, "averageSentenceWords": 16, "longestSentenceWords": 19, "targetOccurrences": 1, "linkingExpressions": 1, "possibleDuplications": 1},
+    "overall": "Your draft contains 32 words in 2 sentence-sized segments. The exact expression ceasefire appears once. This free check measures text patterns; it does not grade your ideas or language quality.",
+    "comparison": "Compared with the previous attempt: word count changed. These are observed changes in measurements, not evidence that the ideas, vocabulary, fluency or pronunciation improved.",
     "criteria": [
-      {"name": "Topic understanding and ideas", "score": 4, "comment": "The ideas address the topic and are plausible."},
-      {"name": "Cohesion and coherence", "score": 3, "comment": "Add an explicit transition between the two points."},
-      {"name": "Word choice", "score": 4, "comment": "Ceasefire is used accurately."},
-      {"name": "Naturalness", "score": 3, "comment": "One phrase can sound more natural."},
-      {"name": "Readability", "score": 4, "comment": "The response is easy to follow."}
+      {"name": "Topic understanding and ideas", "score": null, "comment": "Not assessed. Review the practice prompt and check the reliability of your ideas."},
+      {"name": "Cohesion and coherence", "score": null, "comment": "One linking expression was found; its presence does not establish coherence."},
+      {"name": "Word choice", "score": null, "comment": "The exact expression was found; this does not establish correct use."},
+      {"name": "Naturalness", "score": null, "comment": "Not assessed. Compare your phrasing with trustworthy examples."},
+      {"name": "Readability", "score": null, "comment": "Sentence length is measured; clarity and correctness are not assessed."}
     ],
-    "mistakes": [{"mistake": "The agreement make people hopeful.", "why": "The singular subject needs the verb makes.", "improvement": "Write: The agreement makes people hopeful."}],
-    "nextSteps": ["Add one specific example of rebuilding trust."],
-    "limitations": []
+    "mistakes": [{"mistake": "Possible repeated word to review: the the.", "why": "This may be accidental duplication, but repetition can also be intentional; it is not a confirmed grammar error.", "improvement": "Read this part aloud. Remove one copy only if the repetition does not serve your intended meaning."}],
+    "nextSteps": ["Check your response against the prompt and review any accidental repeated words."],
+    "limitations": ["This free feedback uses rule-based coaching, not an examiner or AI assessment. It cannot judge topic relevance, reliability of ideas, grammatical correctness, word meaning in context or naturalness."]
   }
 }

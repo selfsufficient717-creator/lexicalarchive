@@ -81,3 +81,32 @@ export class VoiceRecorder {
     this.chunks = [];
   }
 }
+
+/** Optional browser transcription; its vendor may process speech remotely. */
+export class BrowserTranscriber {
+  static supported() { return Boolean(globalThis.SpeechRecognition || globalThis.webkitSpeechRecognition); }
+  start(onText, onError) {
+    const Recognition = globalThis.SpeechRecognition || globalThis.webkitSpeechRecognition;
+    if (!Recognition) throw new Error('Automatic transcription is unavailable here. You can type your transcript after recording.');
+    this.recognition = new Recognition();
+    this.recognition.lang = 'en-US';
+    this.recognition.continuous = true;
+    this.recognition.interimResults = true;
+    this.recognition.onresult = event => {
+      let text = '';
+      for (const result of event.results) text += `${result[0].transcript} `;
+      onText(text.trim());
+    };
+    this.recognition.onerror = event => {
+      if (event.error !== 'aborted') onError('Browser transcription stopped. You can type or correct your transcript yourself.');
+    };
+    this.recognition.start();
+  }
+  stop() { try { this.recognition?.stop(); } catch {} }
+  cancel() {
+    if (!this.recognition) return;
+    this.recognition.onresult = null;this.recognition.onerror = null;
+    try { this.recognition.abort(); } catch {}
+    this.recognition = null;
+  }
+}

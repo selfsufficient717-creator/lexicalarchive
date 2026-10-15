@@ -1,44 +1,36 @@
 # Lexical Trove
 
-Turn English words, phrases, long expressions, and idioms encountered in real life into a personal learning collection. There is no built-in word list. Every card is generated from the learner's input and optional source context.
+A personal English word, phrase, and idiom collection with contextual practice, recordings, revisions, email-link accounts, and profile photos. There is no built-in word list or required paid AI service.
 
-## What it does
+## Free workflows
 
-- Automatic lookup after pasting, with simple meanings, translation into a chosen language, natural example sentences, usage notes, synonyms, and linguistically appropriate antonyms.
-- Meaning, synonym, and antonym matching; contextual multiple choice; collocation exercises; long-passage gap filling; active and translation recall; spaced review.
-- Writing topics with feedback on relevance/ideas, cohesion/coherence, word choice, naturalness, and readability.
-- Microphone recording and audio-based feedback on fluency, organization, target expression use, and pronunciation. Accent differences are not automatically mistakes.
-- Feedback starts with an overall impression and explains each mistake, why it is wrong, and how to improve. Each item's writing and speaking topic permits an initial response and two revisions, with comparisons and retained history.
-- Email confirmation links without passwords, cloud-saved collections, and profile photos.
+Without an AI key, the app looks up real entries from Free Dictionary API and Wiktionary. Optional MyMemory translations use its anonymous free quota. Examples and word relations are shown only when the source supplies them. Dictionary wording and its first listed sense are used without claiming automatic simplification or context disambiguation. Missing expressions can be added manually, with a meaning and an example from the learner's source.
 
-## Architecture
+Practice includes matching, recall, translation recall, and gap exercises derived from real examples or pasted passages. A pasted passage of 80+ words can produce long-text gap practice. Sparse source data never becomes invented exercise content.
 
-The static frontend can stay on GitHub Pages. A small authenticated Node API calls OpenAI with a server-only key. Supabase handles email sign-in, private data with row-level security, and profile images. No OpenAI or Supabase service-role key belongs in browser code. See [DEPLOYMENT.md](DEPLOYMENT.md) for the setup walkthrough.
+Basic writing/speaking coaching measures text patterns, exact expression occurrence, recording duration and volume. It has **no examiner scores** and does not claim to judge pronunciation, semantic correctness, topic relevance, naturalness, or factual reliability. Feedback and comparisons are labeled accordingly.
 
-The public connection settings in `config.js` point to the Supabase project and the Render API. Private AI credentials stay in the hosting service's environment settings. If a service is unavailable or unconfigured, the app reports the error; it does not fabricate definitions, sign-in, or feedback. Tests use fixtures only in test code. Actual AI output and email delivery still require live checks with a confirmed account.
+For richer explanations, varied generated exercises, and actual audio-based feedback, the owner can opt into **Gemini's free tier**. Keep the Google project's billing disabled; quotas and regional/model availability apply. If Gemini fails or its quota is exhausted, dictionary lookup and basic coaching are used transparently. The app does not call OpenAI and ignores any old OpenAI key.
 
-## Development
+## Run
 
-Node 24+ is required. There are no npm dependencies to install.
+Node 24+ is required. There are no runtime npm dependencies.
 
 ```sh
 npm start
-```
-
-The server listens on port 3000 (or `PORT`) and serves only the public frontend files. Configure `config.js` and the backend environment variables to use live services. `GET /api/health` reports `configured: false` until the backend requirements are present; `configured: true` reports settings presence, not provider readiness.
-
-```sh
 npm test
-# Optional integration tests, with Python Playwright and Chromium installed:
+# Optional: requires Python Playwright and Chromium
 python3 tests/browser_smoke.py
 ```
 
-Browser tests mock provider/auth responses. They check UI behavior, not real AI accuracy, email delivery, or Supabase deployment.
+The backend needs only `SUPABASE_URL`, `SUPABASE_ANON_KEY` (public publishable/anon key), and `ALLOWED_ORIGIN`. The public website settings are in `config.js`. See [DEPLOYMENT.md](DEPLOYMENT.md) for the already-created services and optional free Gemini setup.
 
-## Data and limitations
+`GET /api/health` reports configuration presence and `mode:"free"`; it does not establish external source readiness or AI account billing status.
 
-Words, writing responses, transcripts, and feedback are private to the signed-in user's account. Profile pictures are public images. Recordings stay on the device until submission, then go to the API/OpenAI for assessment; the app saves a transcript and feedback, not the audio. Provider processing and retention policies still apply.
+## Accounts, costs, and privacy
 
-AI explanations and feedback are fallible learning guidance. They are not official exam grades or factual verification. Expressions without a natural opposite do not receive invented antonyms. Matching needs at least two collected items with distinct relationships. Microphone recording needs HTTPS (or localhost), permission, and a compatible browser.
+Keep GitHub Pages, Render, and Supabase on their free plans. Free quotas, cold starts, pauses, email delivery restrictions, and storage limits apply. The app does not automatically upgrade a plan or purchase credits. Public registration beyond Supabase's test-mail recipient limits needs an SMTP provider; choose one with a free allowance or keep initial testing to allowed recipients. No domain or paid mail provider is required by this code.
 
-Reviews currently schedule at the item level. Each fixed writing/speaking topic has three attempts total; collect another item for another topic. A future version can add multiple independent topic sessions and progress charts.
+Collections, drafts, transcripts, and feedback are protected by account-scoped Supabase row policies. Profile photos are public. Recordings stay local until submission; the app does not store the raw audio. Optional browser transcription may send audio to the browser vendor. Free-tier Gemini sends submitted content to Google under its free-service terms; review those terms before using sensitive material. Dictionary/translation providers receive the lookup expression, not the learner's original passage or performance.
+
+Automated tests use controlled service responses, not real email or AI delivery. Verify live service behavior before making a readiness claim. All three attempts remain saved per item and practice mode; basic-coaching fallback also counts as an attempt, as disclosed in feedback.

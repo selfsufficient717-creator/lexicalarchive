@@ -1,10 +1,10 @@
 # Import this blueprint from the repository root path server/render.yaml.
-# A paid always-on instance avoids cold-start failures for audio requests.
+# Free instance: expect cold starts and free-tier quotas. No paid AI service is used.
 services:
   - type: web
     name: lexical-trove-api
     runtime: node
-    plan: starter
+    plan: free
     buildCommand: node --version
     startCommand: npm start
     healthCheckPath: /api/health
@@ -13,12 +13,8 @@ services:
         value: 24.19.0
       - key: ALLOWED_ORIGIN
         value: https://selfsufficient717-creator.github.io
-      - key: LEXICAL_TEXT_MODEL
-        value: gpt-4o-mini
-      - key: LEXICAL_AUDIO_MODEL
-        value: gpt-audio
-      - key: LEXICAL_AI_API_KEY
-        sync: false
+      - key: GEMINI_FREE_TIER
+        value: "false"
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_ANON_KEY

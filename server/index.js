@@ -2,8 +2,10 @@ import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import { ApiError, validateFeedbackRequest, validateLexiconRequest } from './validation.js';
-import { createFeedback, createLexicon } from './ai.js';
+import { ApiError, validateFeedback, validateFeedbackRequest, validateItem, validateLexiconRequest } from './validation.js';
+import { createLexicon } from './dictionary.js';
+import { createFeedback } from './coaching.js';
+import { createLexicon as geminiLexicon, createFeedback as geminiFeedback } from './gemini.js';
 import { authenticate, loadPractice, savePractice } from './supabase.js';
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
@@ -34,14 +36,15 @@ export function readConfig(env = process.env) {
   }
   if (anonKey.startsWith('sb_secret_') || keyRole === 'service_role') throw new Error('SUPABASE_ANON_KEY must be a public anon/publishable key, never a service-role or secret key.');
   const config = {
-    aiKey: env.LEXICAL_AI_API_KEY || '',
     supabaseUrl,
     supabaseAnonKey: anonKey,
     allowedOrigin,
-    textModel: env.LEXICAL_TEXT_MODEL || 'gpt-4o-mini',
-    audioModel: env.LEXICAL_AUDIO_MODEL || 'gpt-audio',
+    mode: 'free',
+    geminiKey: env.LEXICAL_GEMINI_API_KEY || '',
+    geminiFreeTier: env.GEMINI_FREE_TIER === 'true',
   };
-  config.configured = Boolean(config.aiKey && config.supabaseUrl && config.supabaseAnonKey);
+  config.geminiEnabled = Boolean(config.geminiKey && config.geminiFreeTier);
+  config.configured = Boolean(config.supabaseUrl && config.supabaseAnonKey);
   return config;
 }
 
@@ -117,7 +120,27 @@ function makeLimiter(now) {
   };
 }
 
-export function createApp({ config = readConfig(), fetchImpl = globalThis.fetch, now = Date.now, root = ROOT } = {}) {
+async function lookupFree(config, fetchImpl, request) {
+  if (config.geminiEnabled) {
+    try { return await geminiLexicon(config, fetchImpl, request); }
+    catch (error) { if (!(error instanceof ApiError)) throw error; }
+  }
+  const item = await createLexicon(config, fetchImpl, request);
+  if (config.geminiEnabled) item.fallbackNote = 'Free-tier AI is unavailable for this request. This card uses sourced dictionary data instead.';
+  return item;
+}
+
+async function coachFree(config, fetchImpl, request) {
+  if (config.geminiEnabled) {
+    try { return await geminiFeedback(config, fetchImpl, request); }
+    catch (error) { if (!(error instanceof ApiError)) throw error; }
+  }
+  const feedback = await createFeedback(config, fetchImpl, request);
+  if (config.geminiEnabled) feedback.limitations.unshift('Free-tier AI is unavailable for this request. This attempt uses basic coaching and counts as one of your three attempts.');
+  return feedback;
+}
+
+export function createApp({ config = readConfig(), fetchImpl = globalThis.fetch, now = Date.now, root = ROOT, lexiconImpl = lookupFree, feedbackImpl = coachFree } = {}) {
   const limit = makeLimiter(now);
   const activeUsers = new Map();
   const activityLocks = new Set();
@@ -151,7 +174,7 @@ export function createApp({ config = readConfig(), fetchImpl = globalThis.fetch,
         res.end();
         return;
       }
-      if (req.method === 'GET' && pathname === '/api/health') return json(res, 200, { ok: true, configured: config.configured });
+      if (req.method === 'GET' && pathname === '/api/health') return json(res, 200, { ok: true, configured: config.configured, mode: 'free' });
       if (!['/api/lexicon', '/api/feedback'].includes(pathname)) throw new ApiError(404, 'not_found', 'This API route does not exist.');
       if (req.method !== 'POST') throw new ApiError(405, 'method_not_allowed', 'Use POST for this API route.');
       if (!config.configured) throw new ApiError(503, 'service_not_configured', 'The language service is awaiting deployment configuration.');
@@ -168,7 +191,7 @@ export function createApp({ config = readConfig(), fetchImpl = globalThis.fetch,
       counted = true;
       const body = await readBody(req);
       if (pathname === '/api/lexicon') {
-        const result = await createLexicon(config, fetchImpl, validateLexiconRequest(body));
+        const result = validateItem(await lexiconImpl(config, fetchImpl, validateLexiconRequest(body)));
         return json(res, 200, result);
       }
       const request = validateFeedbackRequest(body);
@@ -179,7 +202,7 @@ export function createApp({ config = readConfig(), fetchImpl = globalThis.fetch,
       }
       activityLocks.add(activityLock);
       const practice = await loadPractice(config, fetchImpl, user, request.itemId, request.mode);
-      const feedback = await createFeedback(config, fetchImpl, { ...request, ...practice });
+      const feedback = validateFeedback(await feedbackImpl(config, fetchImpl, { ...request, ...practice }), request.mode, practice.previousAttempts.length > 0);
       const result = await savePractice(config, fetchImpl, user, request.itemId, request.mode, practice, feedback, request.response);
       json(res, 200, result);
     } catch (error) {

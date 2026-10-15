@@ -29,37 +29,53 @@ export function validateLexiconRequest(body) {
   };
 }
 
-export function validateItem(item) {
+export function validateItem(item, { generated = false } = {}) {
   if (!ownObject(item)) bad('A lexical item object is required.');
   if (!['word', 'phrase', 'idiom'].includes(item.kind)) bad('Lexical item kind is invalid.');
-  if (!Array.isArray(item.exercises) || item.exercises.length < 6 || item.exercises.length > 12) bad('A lexical item must have 6–12 exercises.');
+  if (!Array.isArray(item.exercises) || (generated && item.exercises.length < 6) || item.exercises.length > 12) bad(generated ? 'A generated item must have 6–12 exercises.' : 'A lexical item may have at most 12 exercises.');
   const exercises = item.exercises.map((exercise) => {
     if (!ownObject(exercise) || !['meaning', 'synonym', 'antonym', 'gap', 'context', 'collocation'].includes(exercise.type)) bad('Exercise type is invalid.');
-    const options = strings(exercise.options, 'Exercise options', 6, 500, 2);
+    const options = strings(exercise.options, 'Exercise options', 6, 500, generated ? 2 : 0);
     const answer = text(exercise.answer, 'Exercise answer', 500);
-    if (!options.includes(answer) || new Set(options).size !== options.length) bad('Exercise options must be distinct and contain its answer.');
+    if ((options.length && (options.length < 2 || !options.includes(answer))) || new Set(options).size !== options.length) bad('Exercise options must be distinct and contain its answer.');
     const question = text(exercise.question, 'Exercise question', 4500);
-    if (exercise.type === 'gap' && ((question.match(/_____/g) || []).length !== 1 || question.split(/\s+/).length < 80)) bad('A gap exercise must contain one _____ placeholder in a passage of at least 80 words.');
-    return { type: exercise.type, question, options, answer, explanation: text(exercise.explanation, 'Exercise explanation', 1500) };
+    if (exercise.type === 'gap' && ((question.match(/_____/g) || []).length !== 1 || (generated && question.split(/\s+/).length < 80))) bad('A gap exercise must contain one _____ placeholder in a passage of at least 80 words.');
+    const result = { type: exercise.type, question, options, answer, explanation: text(exercise.explanation, 'Exercise explanation', 1500) };
+    if (exercise.acceptedAnswers !== undefined) result.acceptedAnswers = strings(exercise.acceptedAnswers, 'Accepted answers', 8, 500, 1);
+    return result;
   });
-  if (!exercises.some((entry) => entry.type === 'meaning') || !exercises.some((entry) => entry.type === 'gap') || !exercises.some((entry) => ['context', 'collocation'].includes(entry.type))) bad('Exercises must include meaning matching, an extended gap passage, and context or collocation practice.');
+  if (generated && (!exercises.some((entry) => entry.type === 'meaning') || !exercises.some((entry) => entry.type === 'gap') || !exercises.some((entry) => ['context', 'collocation'].includes(entry.type)))) bad('Exercises must include meaning matching, an extended gap passage, and context or collocation practice.');
   if ((!Array.isArray(item.antonyms) || item.antonyms.length === 0) && exercises.some((entry) => entry.type === 'antonym')) bad('An item without antonyms must not invent an antonym exercise.');
-  return {
+  const result = {
     term: text(item.term, 'Term', 300),
     kind: item.kind,
     pronunciation: text(item.pronunciation, 'Pronunciation', 500, { allowEmpty: true }),
     definition: text(item.definition, 'Definition', 2500),
-    translation: text(item.translation, 'Translation', 1500),
+    translation: text(item.translation, 'Translation', 1500, { allowEmpty: !generated }),
     language: text(item.language, 'Translation language', 80),
     synonyms: strings(item.synonyms, 'Synonyms', 8, 300),
     antonyms: strings(item.antonyms, 'Antonyms', 8, 300),
     antonymNote: text(item.antonymNote, 'Antonym note', 1500, { allowEmpty: Array.isArray(item.antonyms) && item.antonyms.length > 0 }),
-    examples: strings(item.examples, 'Examples', 8, 1500, 2),
+    examples: strings(item.examples, 'Examples', 8, 1500, generated ? 2 : 0),
     usageNote: text(item.usageNote, 'Usage note', 2000),
     speakingPrompt: text(item.speakingPrompt, 'Speaking prompt', 2000),
     writingPrompt: text(item.writingPrompt, 'Writing prompt', 2000),
     exercises,
   };
+  for (const key of ['translationNote', 'examplesNote', 'fallbackNote']) {
+    if (item[key] !== undefined) result[key] = text(item[key], key, 1500, { allowEmpty: true });
+  }
+  if (item.examplesSource !== undefined) result.examplesSource = strings(item.examplesSource, 'Example sources', 8, 500);
+  for (const key of ['source', 'translationSource']) {
+    if (item[key]) {
+      if (!ownObject(item[key])) bad('A source must be an object.');
+      result[key] = { name: text(item[key].name, 'Source name', 200), url: text(item[key].url, 'Source URL', 1500, { allowEmpty: true, optional: true }) };
+      if (item[key].license) result[key].license = text(item[key].license, 'Source license', 200);
+      if (item[key].licenseUrl) result[key].licenseUrl = text(item[key].licenseUrl, 'License URL', 1500);
+    }
+  }
+  if (item.method && ['dictionary', 'manual', 'gemini-free'].includes(item.method)) result.method = item.method;
+  return result;
 }
 
 export const CRITERIA = {
@@ -89,6 +105,16 @@ export function validateFeedback(feedback, mode, revision = false) {
     comparison,
     limitations: strings(feedback.limitations, 'Assessment limitations', 8, 1500),
   };
+  if (feedback.method && ['rules', 'gemini-free'].includes(feedback.method)) result.method = feedback.method;
+  if (feedback.method === 'rules' && ownObject(feedback.metrics)) {
+    result.metrics = {};
+    for (const [key, value] of Object.entries(feedback.metrics).slice(0, 30)) {
+      if (!/^[A-Za-z][A-Za-z0-9]{0,40}$/.test(key)) continue;
+      if ((typeof value === 'number' && Number.isFinite(value)) || typeof value === 'boolean') result.metrics[key] = value;
+    }
+
+  }
+  if (feedback.method === 'rules' && result.criteria.some(criterion => criterion.score !== null)) bad('Rule-based coaching must not invent grades.');
   if (mode === 'speaking') result.transcript = text(feedback.transcript, 'Recording transcript', 20000, { allowEmpty: true });
   return result;
 }
@@ -141,6 +167,11 @@ export function validateFeedbackRequest(body) {
   const itemId = body.itemId;
   const result = { mode: body.mode, item, itemId, prompt, previousAttempts };
   if (body.mode === 'writing') result.response = text(body.response, 'Writing response', 20000);
-  else result.audio = validateWav(body.audio, body.durationSeconds);
+  else {
+    result.audio = validateWav(body.audio, body.durationSeconds);
+    result.transcript = text(body.transcript, 'Speaking transcript', 20000, { optional: true, allowEmpty: true });
+    result.transcriptConfirmed = body.transcriptConfirmed === true;
+    if (result.transcript && !result.transcriptConfirmed) bad('Confirm that the transcript matches your recording before submitting.');
+  }
   return result;
 }

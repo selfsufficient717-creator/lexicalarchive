@@ -84,6 +84,7 @@ export function buildExercises(item, library = [], rng = Math.random) {
       question,
       options: shuffle(options, rng),
       answer: displayedAnswer,
+      acceptedAnswers: uniqueTexts(source.acceptedAnswers?.length ? source.acceptedAnswers : [answer]),
       explanation: text(source.explanation) || definition,
     });
   }

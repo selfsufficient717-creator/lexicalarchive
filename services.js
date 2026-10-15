@@ -310,7 +310,7 @@ async function authenticatedRequest(url, options = {}, supabase = false) {
 }
 
 export async function api(path, body) {
-  if (!serviceReady()) throw new ServiceError('Automatic explanations and feedback are not connected yet. Please try again later.', { code: 'setup_required' });
+  if (!serviceReady()) throw new ServiceError('The learning service is not connected yet. Please try again later.', { code: 'setup_required' });
   if (typeof path !== 'string' || !path.startsWith('/') || path.startsWith('//') || path.includes('..')) throw new ServiceError('Invalid service route.', { code: 'invalid_request' });
   const isForm = typeof globalThis.FormData === 'function' && body instanceof globalThis.FormData;
   const options = { method: body === undefined ? 'GET' : 'POST', headers: {} };
