@@ -1,6 +1,6 @@
 {
   "name": "lexical-trove",
-  "version": "2.1.1",
+  "version": "2.1.2",
   "private": true,
   "description": "Free vocabulary learning with dictionaries, optional free-tier AI, and contextual practice",
   "type": "module",

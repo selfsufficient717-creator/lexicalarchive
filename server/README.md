@@ -8,6 +8,8 @@ Node 24 HTTP service with Supabase authentication, dictionary lookup, basic coac
 - `POST /api/lexicon`: authenticated `{text,context,language}`. Gemini is used only with the owner-confirmed free-tier flag and key; otherwise, or on an AI failure, Free Dictionary API/Wiktionary supply actual entries and optional MyMemory translations.
 - `POST /api/feedback`: authenticated `{itemId,mode,item,prompt,response?,audio?,transcript?,transcriptConfirmed?,previousAttempts?}`. Saved item, prompt and attempt history are authoritative. Gemini receives the actual WAV if enabled. On fallback, rule-based coaching reports measurable patterns with null scores and clear limitations.
 
+Complete AI learning cards have a process-local, account-scoped 15-minute cache keyed by the exact expression, language and source context. It coalesces simultaneous duplicates and is bounded to 128 entries / 8 MiB of serialized cards. Every lookup still authenticates and counts toward rate limits. Invalid results, errors, assessments and dictionary fallbacks are not cached here. HTTP responses remain `no-store`.
+
 Audio is 16kHz mono 16-bit PCM WAV, 1–120 seconds. The app stores transcript/feedback, not raw audio. A supplied transcript must be confirmed by the learner. Pronunciation is never inferred from text. Basic coaching does not assess pronunciation, linguistic naturalness, correctness, semantic topic relevance, or factual reliability.
 
 The Supabase schema caps each activity at an initial attempt plus two revisions, serializes concurrent inserts, and scopes private rows to the user. RLS is not bypassed. CORS, body/length limits, per-user request limits, and strict provider-output validation remain enforced.

@@ -7,6 +7,7 @@ import { createLexicon } from './dictionary.js';
 import { createFeedback } from './coaching.js';
 import { createLexicon as geminiLexicon, createFeedback as geminiFeedback } from './gemini.js';
 import { authenticate, loadPractice, savePractice } from './supabase.js';
+import { createLookupCache } from './lookup-cache.js';
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
 const MAX_BODY = 5_800_000;
@@ -172,6 +173,7 @@ async function coachFree(config, fetchImpl, request) {
 
 export function createApp({ config = readConfig(), fetchImpl = globalThis.fetch, now = Date.now, root = ROOT, lexiconImpl = lookupFree, feedbackImpl = coachFree } = {}) {
   const limit = makeLimiter(now);
+  const lookupCached = createLookupCache({ now });
   const activeUsers = new Map();
   const activityLocks = new Set();
   let activeTotal = 0;
@@ -228,7 +230,8 @@ export function createApp({ config = readConfig(), fetchImpl = globalThis.fetch,
       counted = true;
       const body = await readBody(req);
       if (pathname === '/api/lexicon') {
-        const result = validateItem(await lexiconImpl(config, fetchImpl, validateLexiconRequest(body)));
+        const request = validateLexiconRequest(body);
+        const result = await lookupCached(user.id, request, async () => validateItem(await lexiconImpl(config, fetchImpl, request)));
         return json(res, 200, result);
       }
       const request = validateFeedbackRequest(body);

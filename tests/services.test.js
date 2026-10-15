@@ -67,6 +67,31 @@ test('browser configuration rejects service-role keys and insecure remote endpoi
   assert.equal(service.serviceReady(), false);
 });
 
+test('one public warmup omits credentials and does not wait for sign-in', async () => {
+  let finishWarmup;
+  const { service, calls } = await fixture({ stored: session(), replies: [
+    () => new Promise(resolve => { finishWarmup = () => resolve(new Response('{}')); }),
+    { body: USER },
+  ] });
+  const warming = service.warmService();
+  assert.equal((await service.restoreSession()).user.id, USER.id);
+  await service.warmService();
+  assert.equal(calls.filter(call => call.url.endsWith('/api/health')).length, 1);
+  assert.deepEqual(calls[0], { url: `${CONFIG.apiBaseUrl}/api/health`, method: 'GET', credentials: 'omit', redirect: 'error' });
+  finishWarmup();
+  await warming;
+});
+
+test('warmup failures are silent and never schedule another request', async () => {
+  const { service, calls } = await fixture({ replies: [new Error('Sleeping host unavailable')] });
+  await service.warmService();
+  await service.warmService();
+  assert.equal(calls.length, 1);
+  const disabled = await fixture({ config: { ...CONFIG, apiBaseUrl: '' } });
+  await disabled.service.warmService();
+  assert.equal(disabled.calls.length, 0);
+});
+
 test('magic link uses the correct Supabase redirect_to query and email-only signup', async () => {
   const { service, calls } = await fixture({ replies: [{ body: {} }] });
   await service.sendMagicLink(' learner@example.com ');

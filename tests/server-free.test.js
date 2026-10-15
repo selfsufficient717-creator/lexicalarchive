@@ -120,7 +120,7 @@ function upstream({ authStatus = 200, confirmed = true, missingItem = false, ini
 
 async function start(t, options = {}) {
   const fake = upstream(options.upstream);
-  const server = createApp({ config: options.config ?? readConfig(configEnv), fetchImpl: fake.fetchImpl, ...(options.feedbackImpl ? { feedbackImpl: options.feedbackImpl } : {}) });
+  const server = createApp({ config: options.config ?? readConfig(configEnv), fetchImpl: fake.fetchImpl, ...(options.feedbackImpl ? { feedbackImpl: options.feedbackImpl } : {}), ...(options.lexiconImpl ? { lexiconImpl: options.lexiconImpl } : {}), ...(options.now ? { now: options.now } : {}) });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   t.after(() => new Promise((resolve) => { server.close(resolve); server.closeAllConnections(); }));
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -515,6 +515,62 @@ test('copy/paste whitespace is stripped from the Gemini key and explicit free-ti
   const config = readConfig({ ...configEnv, LEXICAL_GEMINI_API_KEY: '  private-test-key\n', GEMINI_FREE_TIER: ' true ' });
   assert.equal(config.geminiKey, 'private-test-key');
   assert.equal(config.geminiEnabled, true);
+});
+
+test('complete AI lookup reuse still authenticates each request and preserves private HTTP headers', async (t) => {
+  let generations = 0;
+  const api = await start(t, { lexiconImpl: async () => { generations++; return { ...savedItem(), method: 'gemini-free' }; } });
+  const request = { text: 'ceasefire', language: 'Russian', context: 'Both sides agreed.' };
+  const first = await api.request('/api/lexicon', request);
+  const second = await api.request('/api/lexicon', request);
+  assert.equal(first.status, 200);
+  assert.equal(second.status, 200);
+  assert.deepEqual(await second.json(), await first.json());
+  assert.equal(second.headers.get('cache-control'), 'no-store');
+  assert.equal(generations, 1);
+  assert.equal(api.calls.filter(({ url }) => url.endsWith('/auth/v1/user')).length, 2);
+  assert.equal((await api.request('/api/lexicon', request, { Authorization: '' })).status, 401);
+  assert.equal(generations, 1);
+});
+
+test('revoked sign-in cannot read an already cached AI card', async (t) => {
+  let revoked = false;
+  const fake = upstream();
+  const server = createApp({
+    config: readConfig(configEnv),
+    fetchImpl: (url, options) => revoked && String(url).endsWith('/auth/v1/user') ? Response.json({}, { status: 401 }) : fake.fetchImpl(url, options),
+    lexiconImpl: async () => ({ ...savedItem(), method: 'gemini-free' }),
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
+  const request = () => fetch(`http://127.0.0.1:${server.address().port}/api/lexicon`, { method: 'POST', headers: { Authorization: BEARER, 'Content-Type': 'application/json' }, body: JSON.stringify({ text: 'ceasefire', language: 'Russian' }) });
+  assert.equal((await request()).status, 200);
+  revoked = true;
+  const denied = await request();
+  assert.equal(denied.status, 401);
+  assert.equal((await denied.json()).error.code, 'session_expired');
+});
+
+test('invalid AI cards are not cached and a corrected provider result can recover', async (t) => {
+  let generations = 0;
+  const api = await start(t, { lexiconImpl: async () => {
+    generations++;
+    return generations === 1 ? { ...savedItem(), method: 'gemini-free', definition: '' } : { ...savedItem(), method: 'gemini-free' };
+  } });
+  const request = { text: 'ceasefire', language: 'Russian' };
+  assert.equal((await api.request('/api/lexicon', request)).status, 400);
+  assert.equal((await api.request('/api/lexicon', request)).status, 200);
+  assert.equal((await api.request('/api/lexicon', request)).status, 200);
+  assert.equal(generations, 2);
+});
+
+test('cache hits count toward existing per-user request limits', async (t) => {
+  let generations = 0;
+  const api = await start(t, { lexiconImpl: async () => { generations++; return { ...savedItem(), method: 'gemini-free' }; } });
+  const request = { text: 'ceasefire', language: 'Russian' };
+  for (let i = 0; i < 20; i++) assert.equal((await api.request('/api/lexicon', request)).status, 200);
+  assert.equal((await api.request('/api/lexicon', request)).status, 429);
+  assert.equal(generations, 1);
 });
 
 test('dictionary misses do not hide the Gemini fallback reason or leak provider content', async t => {

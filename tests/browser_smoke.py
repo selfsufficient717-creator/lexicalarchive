@@ -55,6 +55,13 @@ class MockServices:
         self.unexpected = []
         self.lookup_delays = {}
         self.lookup_failures = {}
+        self.hold_saves = False
+        self.held_saves = []
+        self.save_failures = []
+        self.hold_library = False
+        self.held_libraries = []
+        self.hold_health = False
+        self.held_health = []
 
     def install(self, context):
         context.route("**/*", self.route)
@@ -64,6 +71,10 @@ class MockServices:
 
     def fulfill(self, route, data=None, status=200):
         route.fulfill(status=status, content_type="application/json", body=json.dumps(data))
+
+    def complete_save(self, route, body):
+        self.items = [item for item in self.items if item["id"] != body["id"]] + [body]
+        self.fulfill(route, None, 204)
 
     def route(self, route):
         request = route.request
@@ -90,7 +101,12 @@ class MockServices:
         self.requests.append({"url": request.url, "method": request.method, "body": body, "headers": request.headers})
         path = parsed.path
         query = parse_qs(parsed.query)
-        if path == "/auth/v1/user":
+        if path == "/api/health":
+            if self.hold_health:
+                self.held_health.append(route)
+            else:
+                self.fulfill(route, {"ok": True})
+        elif path == "/auth/v1/user":
             self.fulfill(route, USER if self.auth_valid else {"message": "Invalid link"}, 200 if self.auth_valid else 401)
         elif path == "/auth/v1/token":
             self.fulfill(route, {"message": "Invalid refresh token"}, 401)
@@ -98,10 +114,17 @@ class MockServices:
             self.fulfill(route, {})
         elif path == "/rest/v1/items":
             if request.method == "GET":
-                self.fulfill(route, self.items)
+                if self.hold_library:
+                    self.held_libraries.append((route, copy.deepcopy(self.items)))
+                else:
+                    self.fulfill(route, self.items)
             elif request.method == "POST":
-                self.items.append(body)
-                self.fulfill(route, None, 204)
+                if self.hold_saves:
+                    self.held_saves.append((route, body))
+                elif self.save_failures:
+                    self.fulfill(route, {"message": self.save_failures.pop(0)}, 503)
+                else:
+                    self.complete_save(route, body)
             elif request.method == "PATCH":
                 row = next(row for row in self.items if row["id"] == query["id"][0][3:])
                 row.update(body)
@@ -257,6 +280,84 @@ def main():
             assert "access_token" not in page.url and "refresh_token" not in page.url
             assert page.evaluate("localStorage.getItem('lexical-trove-session-v1')") is None
             check("invalid confirmation link is removed and cannot create an account session")
+            context.close()
+
+            saving_mock = MockServices(base_url)
+            saving_mock.hold_health = True
+            saving_mock.hold_library = True
+            saving_mock.hold_saves = True
+            all_mocks.append(saving_mock)
+            context, page = new_page(browser, saving_mock)
+            context.add_cookies([{"name": "private-session-cookie", "value": "not-for-health", "url": base_url}])
+            navigate_signed_in(page, saving_mock)
+            health_calls = saving_mock.calls("/api/health", "GET")
+            assert len(health_calls) == 1
+            assert "authorization" not in health_calls[0]["headers"] and "cookie" not in health_calls[0]["headers"]
+            page.locator("#language").fill("Uzbek")
+            page.locator("#lexical-input").fill("ceasefire")
+            page.evaluate("""() => {
+                document.querySelector('#lexical-input').dispatchEvent(new Event('paste', { bubbles: true }));
+                document.querySelector('#capture-form').requestSubmit();
+            }""")
+            expect(page.locator(".entry-definition")).to_have_text(FIXTURES["items"][0]["definition"])
+            expect(page.locator("#entry-panel")).to_contain_text("Saving to your trove")
+            expect(page.get_by_role("button", name="Practise this item →", exact=True)).to_be_disabled()
+            expect(page.get_by_role("button", name="Open my trove", exact=True)).to_be_disabled()
+            expect(page.locator("#library-count")).to_have_text("0")
+            page.wait_for_timeout(50)
+            assert len(saving_mock.held_saves) == 1
+            assert len(saving_mock.held_health) == 1
+            check("public warmup never blocks sign-in or lookup, and the explanation appears before its cloud save finishes")
+
+            held_route, held_row = saving_mock.held_saves.pop()
+            saving_mock.fulfill(held_route, {"message": "Temporary save interruption"}, 503)
+            expect(page.get_by_role("button", name="Retry saving", exact=True)).to_be_visible()
+            expect(page.locator(".entry-definition")).to_have_text(FIXTURES["items"][0]["definition"])
+            expect(page.locator("#lookup-status")).to_contain_text("has not been saved")
+            saving_mock.hold_saves = False
+            page.get_by_role("button", name="Retry saving", exact=True).click()
+            expect(page.locator("#library-count")).to_have_text("1")
+            expect(page.get_by_role("button", name="Practise this item →", exact=True)).to_be_enabled()
+            expect(page.get_by_role("button", name="Retry saving", exact=True)).to_have_count(0)
+            save_calls = saving_mock.calls("/rest/v1/items", "POST")
+            assert len(save_calls) == 2 and save_calls[0]["body"]["id"] == save_calls[1]["body"]["id"] == held_row["id"]
+            assert len(saving_mock.items) == 1 and len(saving_mock.calls("/api/lexicon", "POST")) == 1
+            check("failed saves keep the explanation visible and retry the same item without a second AI lookup or duplicate")
+
+            library_route, old_items = saving_mock.held_libraries.pop()
+            saving_mock.fulfill(library_route, old_items)
+            saving_mock.fulfill(saving_mock.held_health.pop(), {"ok": True})
+            page.wait_for_timeout(400)
+            expect(page.locator("#library-count")).to_have_text("1")
+            assert len(saving_mock.calls("/api/health", "GET")) == 1
+            assert len(saving_mock.calls("/api/lexicon", "POST")) == 1
+            check("a delayed initial collection snapshot cannot discard an item saved while sync was pending")
+            check("an explicit submit cancels the pending paste timer instead of submitting the same expression twice")
+            context.close()
+
+            save_signout_mock = MockServices(base_url)
+            save_signout_mock.hold_saves = True
+            all_mocks.append(save_signout_mock)
+            context, page = new_page(browser, save_signout_mock)
+            navigate_signed_in(page, save_signout_mock)
+            page.locator("#language").fill("Uzbek")
+            page.locator("#lexical-input").fill("private pending explanation")
+            page.locator("#lookup-button").click()
+            expect(page.locator(".entry-title")).to_have_text("private pending explanation")
+            expect(page.locator("#entry-panel")).to_contain_text("Saving to your trove")
+            page.wait_for_timeout(50)
+            page.locator("#account-button").click()
+            page.get_by_role("button", name="Sign out", exact=True).click()
+            expect(page.locator("#account-label")).to_have_text("Sign in")
+            held_route, held_row = save_signout_mock.held_saves.pop()
+            save_signout_mock.complete_save(held_route, held_row)
+            expect(page.locator("#lookup-button")).to_be_enabled()
+            expect(page.locator("#entry-panel")).not_to_be_visible()
+            expect(page.locator("#entry-panel")).to_have_text("")
+            expect(page.locator("#library-count")).to_have_text("0")
+            assert page.evaluate("JSON.parse(localStorage.getItem('lexical-trove:guest') || '[]')") == []
+            assert page.evaluate("localStorage.getItem('lexical-trove-session-v1')") is None
+            check("sign-out removes a displayed pending explanation and a delayed save cannot restore private state")
             context.close()
 
             free_lookup = MockServices(base_url)
@@ -623,7 +724,7 @@ def main():
             context.close()
 
             assert not [url for mocked in all_mocks for url in mocked.unexpected], [url for mocked in all_mocks for url in mocked.unexpected]
-            assert all(call["headers"].get("authorization") == "Bearer " + TOKEN for call in mock.requests if "/api/" in call["url"])
+            assert all(call["headers"].get("authorization") == "Bearer " + TOKEN for call in mock.requests if urlparse(call["url"]).path in ("/api/lexicon", "/api/feedback"))
             check("no unexpected external requests or browser errors; AI requests carry verified session")
             browser.close()
             print(f"\n{passed} browser integration checks passed. Supabase and AI responses were deterministic fixtures; no live provider calls.", flush=True)

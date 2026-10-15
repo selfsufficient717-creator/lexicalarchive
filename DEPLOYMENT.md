@@ -68,6 +68,12 @@ After deployment:
 
 ## Lookup troubleshooting
 
+The page sends one anonymous health request on opening to start waking Render while the learner signs in or types. It does not wait for that request or send periodic keep-alive traffic. Free Render can still delay the first lookup after inactivity.
+
+Gemini is asked for a compact complete card: three examples, six varied exercises, and one 80–100 word gap passage, plus the existing translation, relations, usage notes and speaking/writing prompts. The frontend shows the explanation as soon as it arrives, while its account save finishes; practice actions wait for a successful save. A failed save can be retried without generating the card again.
+
+Complete AI cards are reused for 15 minutes per verified account and exact expression, translation language and original context. Simultaneous duplicate requests share one generation. This process-local cache is limited to 128 cards and 8 MiB of serialized card data and clears on restart. Authentication and request limits still run on every request. Errors and dictionary fallbacks are not retained by this AI cache, so later requests can recover after an outage. Dictionary source caches remain separate. These changes reduce avoidable work; they do not guarantee a fixed response time from free hosting or Gemini.
+
 Capitalized words and phrases are checked with their original spelling first, then their complete lowercase spelling. Exact entries take priority; a lowercase fallback is explicitly labeled. Case-sensitive meanings and their cached translations stay separate. A failed provider is reported as unavailable rather than evidence that a word does not exist.
 
 Open `https://lexical-trove-api.onrender.com/api/health` to inspect the safe `gemini` flags. `keyPresent:false` means the Render key variable is missing/blank; `freeTierConfirmed:false` means its explicit free-tier flag is not set to `true`; `enabled:true` only means those settings are present, not that the key/model/quota works. Never send the actual key. Render logs use the safe `gemini_fallback` event and a category for quota, permissions, missing model, or invalid response. If dictionaries also fail, the app preserves the AI fallback reason.

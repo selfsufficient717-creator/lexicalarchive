@@ -41,6 +41,19 @@ function publicKeyOnly(key) {
 export function serviceReady() { return validBaseUrl(CONFIG.apiBaseUrl); }
 export function accountReady() { return validBaseUrl(CONFIG.supabaseUrl) && publicKeyOnly(CONFIG.supabaseAnonKey); }
 
+let warmupStarted = false;
+export async function warmService() {
+  if (warmupStarted || !serviceReady()) return;
+  warmupStarted = true;
+  try {
+    // Wake a sleeping free host while the user signs in or enters an expression.
+    // This public status request carries no account credentials or provider work.
+    await globalThis.fetch(`${CONFIG.apiBaseUrl.replace(/\/+$/, '')}/api/health`, {
+      method: 'GET', credentials: 'omit', redirect: 'error',
+    });
+  } catch { /* A warmup failure must not interrupt the app or trigger retries. */ }
+}
+
 function requireAccountConfig() {
   if (!accountReady()) {
     throw new ServiceError('Email sign-in is not connected yet. Please try again once accounts are available.', { code: 'setup_required' });

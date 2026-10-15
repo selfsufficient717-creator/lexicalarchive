@@ -15,7 +15,7 @@ const button = (text, action, className = '') => {
   node.addEventListener('click', action);
   return node;
 };
-const state = { items: [], activeId: null, mode: 'quiz', view: 'discover', busy: false, quiz: null, attempts: [], studioToken: 0, recording: null, audio: null, recorder: null, profile: null, draft: '', syncing: false };
+const state = { items: [], activeId: null, mode: 'quiz', view: 'discover', busy: false, quiz: null, attempts: [], studioToken: 0, recording: null, audio: null, recorder: null, profile: null, draft: '', syncing: false, entryId: null, accountEpoch: 0, collectionVersion: 0, collectionLoad: 0, collectionChanges: new Map() };
 const ownerId = () => services.getSession()?.user?.id || 'guest';
 const storageKey = () => `lexical-trove:${ownerId()}`;
 function notify(message, error = false) {
@@ -35,6 +35,7 @@ function readCache() {
   } catch { return []; }
 }
 function active() { return state.items.find(item => item.id === state.activeId); }
+function collectionChanged(id, deleted = false) { state.collectionChanges.set(id, { version: ++state.collectionVersion, deleted }); }
 function isDue(item) { return !item.review?.dueAt || Date.parse(item.review.dueAt) <= Date.now(); }
 function revokeAudio() { if (state.audio?.url) URL.revokeObjectURL(state.audio.url); state.audio = null; }
 function leaveRecording() { state.transcriber?.cancel();state.transcriber = null; state.recorder?.cancel(); state.recorder = null; state.recording = false; revokeAudio(); }
@@ -62,17 +63,23 @@ function updateCollection() {
 }
 async function loadCollection() {
   const owner = ownerId();
+  const epoch = state.accountEpoch, load = ++state.collectionLoad;
   state.items = readCache();
   updateCollection();
   if (services.getSession() && services.accountReady()) {
+    const version = state.collectionVersion;
     state.syncing = true;
     try {
       const items = await services.loadLibrary();
-      if (ownerId() !== owner) return;
-      state.items = items;cacheItems();updateCollection();
+      if (ownerId() !== owner || state.accountEpoch !== epoch || state.collectionLoad !== load) return;
+      // An initial sync can finish after a new discovery has already been saved.
+      // Preserve changes made since this snapshot was requested, including removals.
+      const changed = new Set([...state.collectionChanges].filter(([, change]) => change.version > version).map(([id]) => id));
+      state.items = [...state.items.filter(item => changed.has(item.id) && !state.collectionChanges.get(item.id).deleted), ...items.filter(item => !changed.has(item.id))];
+      cacheItems();updateCollection();
     }
-    catch (error) { if (ownerId() === owner) notify(`Your saved copy is available, but we couldn’t sync your trove. ${error.message}`, true); }
-    finally { state.syncing = false; }
+    catch (error) { if (ownerId() === owner && state.accountEpoch === epoch) notify(`Your saved copy is available, but we couldn’t sync your trove. ${error.message}`, true); }
+    finally { if (state.collectionLoad === load && state.accountEpoch === epoch) state.syncing = false; }
   }
 }
 function needsServices(statusNode) {
@@ -89,6 +96,7 @@ function needsServices(statusNode) {
 }
 async function lookup(event) {
   event?.preventDefault();
+  clearTimeout(pasteTimer);
   const text = $('#lexical-input').value.trim();
   const language = $('#language').value.trim();
   const output = $('#lookup-status');
@@ -103,13 +111,10 @@ async function lookup(event) {
     const payload = await services.api('/api/lexicon', { text, language, context: $('#context').value.trim() });
     if (ownerId() !== owner) return;
     const record = { id: crypto.randomUUID(), payload, review: { dueAt: new Date().toISOString(), intervalDays: 0, streak: 0, reviewCount: 0 } };
-    await services.saveItem(record);
-    if (ownerId() !== owner) return;
-    state.items.unshift(record);
-    if (state.view === 'discover') state.activeId = record.id;
-    cacheItems(); updateCollection(); renderEntry(record);
-    status(output, 'Added to your trove. Understanding it is the beginning—now make it stick.');
+    renderEntry(record, { saved: false, saving: true });
+    status(output, 'Your explanation is ready. Saving it to your trove…');
     $('#entry-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    await saveExploredRecord({ record, owner, epoch: state.accountEpoch, saving: false });
   } catch (error) {
     if (ownerId() === owner) {
       status(output, error.message, true);
@@ -121,8 +126,37 @@ async function lookup(event) {
     if (state.pendingPaste) { state.pendingPaste = false; setTimeout(() => lookup(), 0); }
   }
 }
-function renderEntry(record) {
+async function saveExploredRecord(task) {
+  const { record, owner, epoch } = task;
+  const currentOwner = () => ownerId() === owner && state.accountEpoch === epoch;
+  if (task.saving || !currentOwner()) return;
+  task.saving = true;
+  if (state.entryId === record.id) {
+    renderEntry(record, { saved: false, saving: true });
+    status($('#lookup-status'), 'Your explanation is ready. Saving it to your trove…');
+  }
+  try {
+    // Retrying uses this same ID and payload; it never repeats the AI lookup.
+    await services.saveItem(record);
+    if (!currentOwner()) return;
+    state.items = [record, ...state.items.filter(item => item.id !== record.id)];
+    collectionChanged(record.id);
+    if (state.view === 'discover' && state.entryId === record.id) state.activeId = record.id;
+    cacheItems();updateCollection();
+    if (state.entryId === record.id) {
+      renderEntry(record);
+      status($('#lookup-status'), 'Added to your trove. Understanding it is the beginning—now make it stick.');
+    }
+  } catch (error) {
+    if (currentOwner() && state.entryId === record.id) {
+      renderEntry(record, { saved: false, saveError: error.message, retrySave: () => saveExploredRecord(task) });
+      status($('#lookup-status'), 'Your explanation is ready, but it has not been saved. Use “Retry saving” below.', true);
+    }
+  } finally { task.saving = false; }
+}
+function renderEntry(record, { saved = true, saving = false, saveError = '', retrySave } = {}) {
   const item = record.payload;
+  state.entryId = record.id;
   const panel = $('#entry-panel');
   panel.replaceChildren(); panel.hidden = false;
   const top = element('div', 'entry-top');
@@ -153,6 +187,13 @@ function renderEntry(record) {
   grid.append(examples, relations);
   const actions = element('div', 'entry-actions');
   actions.append(button('Practise this item →', () => { state.activeId = record.id; state.quiz = null; state.mode = 'quiz'; showView('practice'); }, 'primary'), button('Open my trove', () => showView('library')));
+  if (!saved) {
+    for (const action of actions.children) action.disabled = true;
+    const saveStatus = element('p', `form-status${saveError ? ' error' : ''}`, saving ? 'Saving to your trove… Practice will be ready once it is saved.' : `This explanation is not saved yet. ${saveError}`);
+    saveStatus.setAttribute('role', 'status');
+    actions.prepend(saveStatus);
+    if (retrySave) actions.append(button('Retry saving', retrySave, 'primary'));
+  }
   if (item.fallbackNote) panel.append(element('p', 'usage-note', item.fallbackNote));
   panel.append(top, element('p', 'entry-definition', item.definition), translation, grid, element('p', 'usage-note', item.usageNote || 'Use the original context to choose the meaning that fits.'), actions);
   for (const source of [item.source, item.translationSource]) {
@@ -194,6 +235,7 @@ function renderLibrary() {
       try {
         if (services.getSession()) await services.deleteItem(record.id);
         state.items = state.items.filter(item => item.id !== record.id);
+        collectionChanged(record.id, true);
         if (state.activeId === record.id) { state.activeId = null; $('#entry-panel').hidden = true; }
         cacheItems(); updateCollection();
       } catch (error) { notify(error.message, true); }
@@ -218,7 +260,7 @@ async function saveReview(correct, itemId) {
   const record = state.items.find(item => item.id === itemId); if (!record) return;
   const previous = record.review;
   record.review = nextReview(previous, correct);
-  try { if (services.getSession()) await services.saveReview(record.id, record.review); cacheItems(); updateCollection(); }
+  try { if (services.getSession()) await services.saveReview(record.id, record.review); collectionChanged(record.id);cacheItems(); updateCollection(); }
   catch (error) { record.review = previous; notify(`Your answer was checked, but review progress could not be saved. ${error.message}`, true); }
 }
 function renderQuiz() {
@@ -471,7 +513,11 @@ function openAccount() {
     } catch (error) { status(out, error.message, true); }
     finally { save.disabled = false; }
   });content.append(form, button('Sign out', async () => {
-    try { await services.signOut();state.profile = null;state.activeId = null;state.drafts = {};status($('#lookup-status'), '');leaveRecording();state.studioToken++;$('#entry-panel').hidden = true;updateAccountHeader();await loadCollection();dialog.close();showView('discover');notify('You’re signed out. Your trove is waiting in your account.'); }
+    const signingOut = services.signOut();
+    state.accountEpoch++;state.entryId = null;state.pendingPaste = false;clearTimeout(pasteTimer);
+    state.items = [];state.activeId = null;state.profile = null;state.collectionChanges.clear();state.syncing = false;
+    $('#entry-panel').replaceChildren();$('#entry-panel').hidden = true;updateCollection();updateAccountHeader();
+    try { await signingOut;state.profile = null;state.activeId = null;state.drafts = {};status($('#lookup-status'), '');leaveRecording();state.studioToken++;$('#entry-panel').hidden = true;updateAccountHeader();await loadCollection();dialog.close();showView('discover');notify('You’re signed out. Your trove is waiting in your account.'); }
     catch (error) { notify(error.message, true); }
     finally {
       if (!services.getSession()) {
@@ -506,7 +552,7 @@ async function addManualItem(event) {
     const record = { id: crypto.randomUUID(), payload, review: { dueAt: new Date().toISOString(), intervalDays: 0, streak: 0, reviewCount: 0 } };
     await services.saveItem(record);
     if (ownerId() !== owner) return;
-    state.items.unshift(record);if (state.view === 'discover') state.activeId = record.id;cacheItems();updateCollection();renderEntry(record);
+    state.items.unshift(record);collectionChanged(record.id);if (state.view === 'discover') state.activeId = record.id;cacheItems();updateCollection();renderEntry(record);
     status(out, 'Saved to your trove. You can practise this expression like any other item.');
     $('#manual-entry').open = false;$('#entry-panel').scrollIntoView({ behavior: 'smooth' });
   } catch (error) { if (ownerId() === owner) status(out, error.message, true); }
@@ -517,7 +563,7 @@ $('#capture-form').addEventListener('submit', lookup);
 let pasteTimer;
 $('#lexical-input').addEventListener('paste', () => {
   clearTimeout(pasteTimer);
-  if ($('#auto-paste').checked) pasteTimer = setTimeout(() => { if (state.busy) state.pendingPaste = true; else lookup(); }, 850);
+  if ($('#auto-paste').checked) pasteTimer = setTimeout(() => { if (state.busy) state.pendingPaste = true; else lookup(); }, 250);
 });
 $('#language').addEventListener('change', () => { try { localStorage.setItem('lexical-trove-language', $('#language').value.trim()); } catch {} });
 try { $('#language').value = localStorage.getItem('lexical-trove-language') || ''; } catch {}
@@ -528,6 +574,7 @@ $('#library-search').addEventListener('input', renderLibrary);$('#due-only').add
 $('#account-button').addEventListener('click', openAccount);$('#close-account').addEventListener('click', () => $('#account-dialog').close());
 window.addEventListener('pagehide', leaveRecording);
 async function initialize() {
+  void services.warmService();
   try {
     await services.restoreSession();
     if (services.getSession()) state.profile = await services.loadProfile();
